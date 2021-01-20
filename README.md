@@ -1,5 +1,5 @@
 # iPub Refit
-<a href="https://www.embarcadero.com/products/delphi" title=""><img src="https://img.shields.io/static/v1?label=Delphi%20Supported%20Versions&message=XE7%2B&color=blueviolet&style=for-the-badge"></a> <a href="http://docwiki.embarcadero.com/PlatformStatus/en/Main_Page" title=""><img src="https://img.shields.io/static/v1?label=Supported%20platforms&message=Full%20Cross-Platform&color=blue&style=for-the-badge"></a>
+<a href="https://www.embarcadero.com/products/delphi" title=""><img src="https://img.shields.io/static/v1?label=Delphi%20Supported%20Versions&message=10.2%2B&color=blueviolet&style=for-the-badge"></a> <a href="http://docwiki.embarcadero.com/PlatformStatus/en/Main_Page" title=""><img src="https://img.shields.io/static/v1?label=Supported%20platforms&message=Full%20Cross-Platform&color=blue&style=for-the-badge"></a>
 
 The iPub Refit is a library to facilitate to implement the existing REST APIs, declaring only one interface and is created by the iPub team.
 
@@ -210,7 +210,7 @@ The GRestService instance generates an implementation of IGitHubApi that interna
 
 
 ## Compatibility
-This library full cross-platform and was made and tested on delphi Sydney 10.4, but it is likely to work on several previous versions, probably XE7 or newer.
+This library full cross-platform and was made and tested on delphi Sydney 10.4, but it is likely to work on previous versions, probably 10.2 Tokyo or newer.
 
 ## License
 The iPub Refit is licensed under MIT, and the license file is included in this folder.
