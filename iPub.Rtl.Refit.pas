@@ -7,6 +7,7 @@ interface
 uses
   { Delphi }
   System.SysUtils,
+  System.JSON.Serializers,
   System.NetEncoding,
   System.Net.HttpClientComponent;
 
@@ -75,12 +76,16 @@ type
   // api interfaces for the same api, each one will have a different connection.
   TipRestService = class
   protected
+    type
+      TJsonConverterClass = class of TJsonConverter;
+  protected
     procedure MakeFor(const ATypeInfo: Pointer; const AClient: TNetHTTPClient; const ABaseUrl: string; out AResult); virtual; abstract;
   public
     function &For<T: IInterface>: T; overload;
     function &For<T: IInterface>(const ABaseUrl: string): T; overload;
     // You can pass your own client, but you will be responsible for giving the client free after use the rest api interface returned
     function &For<T: IInterface>(const AClient: TNetHTTPClient; const ABaseUrl: string = ''): T; overload;
+    procedure RegisterConverters(const AConverterClasses: TArray<TJsonConverterClass>); virtual; abstract;
   end;
 
 var
@@ -98,7 +103,6 @@ uses
   System.SyncObjs,
   System.JSON.Writers,
   System.JSON.Readers,
-  System.JSON.Serializers,
   System.Net.HttpClient,
   System.Net.URLClient;
 
@@ -203,7 +207,7 @@ type
     FJsonSerializer: TApiJsonSerializer;
     procedure CallApi(const AMethodHandle: Pointer; const AArgs: TArray<TValue>; var AResult: TValue);
   public
-    constructor Create(const AApiType: IApiType; const AClient: TNetHTTPClient; const ABaseUrl: string);
+    constructor Create(const AApiType: IApiType; const AConverters: TArray<TJsonConverter>; const AClient: TNetHTTPClient; const ABaseUrl: string);
     destructor Destroy; override;
   end;
 
@@ -212,6 +216,7 @@ type
   TRestServiceManager = class(TipRestService)
   strict private
     FApiTypeMap: TDictionary<PTypeInfo, IApiType>;
+    FConvertersList: TObjectList<TJsonConverter>;
     {$IF CompilerVersion >= 34.0}
     FLock: TLightweightMREW;
     {$ELSE}
@@ -225,6 +230,7 @@ type
     constructor Create;
     {$ENDIF}
     destructor Destroy; override;
+    procedure RegisterConverters(const AConverterClasses: TArray<TipRestService.TJsonConverterClass>); override;
   end;
 
 const
@@ -715,7 +721,8 @@ begin
 end;
 
 constructor TApiVirtualInterface.Create(const AApiType: IApiType;
-  const AClient: TNetHTTPClient; const ABaseUrl: string);
+  const AConverters: TArray<TJsonConverter>; const AClient: TNetHTTPClient;
+  const ABaseUrl: string);
 begin
   inherited Create(AApiType.TypeInfo,
     procedure(AMethod: TRttiMethod; const AArgs: TArray<TValue>; out AResult: TValue)
@@ -732,6 +739,8 @@ begin
   if FBaseUrl.IsEmpty then
     raise EipRestService.Create('Invalid base url. The base url can be set as an argument or declaring the attribute [BaseUrl(?)] above the apiinterface service');
   FJsonSerializer := TApiJsonSerializer.Create;
+  if Length(AConverters) > 0 then
+    FJsonSerializer.Converters.InsertRange(0, AConverters);
   if Assigned(AClient) then
     FClient := AClient
   else
@@ -818,6 +827,8 @@ begin
   {$IF CompilerVersion < 34.0}
   FLock.Free;
   {$ENDIF}
+  if Assigned(FConvertersList) then
+    FConvertersList.Free;
   if Assigned(FApiTypeMap) then
     FApiTypeMap.Free;
   inherited;
@@ -828,6 +839,7 @@ procedure TRestServiceManager.MakeFor(const ATypeInfo: Pointer;
 var
   LInterface: IInterface;
   LApiType: IApiType;
+  LConverters: TArray<TJsonConverter>;
 begin
   if PTypeInfo(ATypeInfo).Kind <> TTypeKind.tkInterface then
     raise EipRestService.Create('Invalid type');
@@ -842,6 +854,10 @@ begin
       FApiTypeMap.TryGetValue(ATypeInfo, LApiType)
     else
       LApiType := nil;
+    if Assigned(FConvertersList) then
+      LConverters := FConvertersList.ToArray
+    else
+      LConverters := nil;
   finally
     {$IF CompilerVersion >= 34.0}
     FLock.EndRead;
@@ -874,9 +890,33 @@ begin
     end;
   end;
 
-  LInterface := TApiVirtualInterface.Create(LApiType, AClient, ABaseUrl);
+  LInterface := TApiVirtualInterface.Create(LApiType, LConverters, AClient, ABaseUrl);
   if not Supports(LInterface, LApiType.IID, AResult) then
     raise EipRestService.Create('Unexpected error creating the service');
+end;
+
+procedure TRestServiceManager.RegisterConverters(
+  const AConverterClasses: TArray<TipRestService.TJsonConverterClass>);
+var
+  I: Integer;
+begin
+  {$IF CompilerVersion >= 34.0}
+  FLock.BeginWrite;
+  {$ELSE}
+  FLock.Enter;
+  {$ENDIF}
+  try
+    if not Assigned(FConvertersList) then
+      FConvertersList := TObjectList<TJsonConverter>.Create(True);
+    for I := 0 to Length(AConverterClasses)-1 do
+      FConvertersList.Add(AConverterClasses[I].Create);
+  finally
+    {$IF CompilerVersion >= 34.0}
+    FLock.EndWrite;
+    {$ELSE}
+    FLock.Leave;
+    {$ENDIF}
+  end;
 end;
 
 initialization
