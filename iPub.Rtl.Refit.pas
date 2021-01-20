@@ -230,7 +230,7 @@ type
 const
   CMethodsWithBodyContent: set of TMethodKind = [TMethodKind.Post, TMethodKind.Put];
   CMethodsWithoutResponseContent: set of TMethodKind = [TMethodKind.Head];
-  CSupportedResultKind: set of TTypeKind = [TTypeKind.tkUString, TTypeKind.tkClass, TTypeKind.tkMRecord, TTypeKind.tkRecord];
+  CSupportedResultKind: set of TTypeKind = [TTypeKind.tkUString, TTypeKind.tkClass, TTypeKind.tkMRecord, TTypeKind.tkRecord, TTypeKind.tkDynArray];
 
 { EipRestServiceStatusCode }
 
@@ -468,6 +468,7 @@ begin
 
         case FResultKind of
           TTypeKind.tkUString: AResult := LResponseString;
+          TTypeKind.tkDynArray,
           TTypeKind.tkClass,
           TTypeKind.tkMRecord,
           TTypeKind.tkRecord: AResult := AJsonSerializer.Deserialize(LResponseString, FResultTypeInfo);
@@ -626,6 +627,11 @@ begin
     FResultKind := ARttiReturnType.TypeKind;
     if not (FResultKind in CSupportedResultKind) then
       raise EipRestService.CreateFmt('The result type in %s method is not allowed', [FQualifiedName]);
+    if (FResultKind = TTypeKind.tkDynArray) and ((not Assigned(TRttiDynamicArrayType(ARttiReturnType).ElementType)) or
+       not (TRttiDynamicArrayType(ARttiReturnType).ElementType.TypeKind in [TTypeKind.tkClass, TTypeKind.tkMRecord, TTypeKind.tkRecord])) then
+    begin
+      raise EipRestService.CreateFmt('The result type in %s method is not allowed', [FQualifiedName]);
+    end;
     FResultTypeInfo := ARttiReturnType.Handle;
     FResultIsDateTime := IsDateTime(ARttiReturnType.Handle);
   end;

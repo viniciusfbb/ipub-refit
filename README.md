@@ -41,7 +41,7 @@ The GRestService instance generates an implementation of IGitHubApi that interna
   - The interface must have one IID (GUID).
     
   #### Methods
-  The methods of the rest api interface can be a procedure or a function returning a string, record or class. The method name don't matter. To declare you should declare an attribute informing the method kind and relative url
+  The methods of the rest api interface can be a procedure or a function returning a string, record, class, dynamic array of record or dinamic array of class. The method name don't matter. To declare you should declare an attribute informing the method kind and relative url
   You should declare the method kind of the interface method and the relative url
   ```delphi
   [Get('/users/{AUser}')]
@@ -68,7 +68,7 @@ The GRestService instance generates an implementation of IGitHubApi that interna
   If the argument name is ```Body```, ```ABody```, ```BodyContent```, ```ABodyContent```, ```Content``` or ```AContent```, the argument will be used as the body of the request. You can also declare other name and use the attribute [Body] in this argument. When a argument is a body, no matter the argument type, it will be casted to string. If it is a record or class, we will serialize it to a json automatically.
   Remember that the mask {argument_name} in relative url, can be in anywhere, including inside queries, and can repeat.
   
-  The type of the argument don't matter, we will cast to string automatically. So you can us, for example, an integer parameter:
+  The type of the argument don't matter, we will cast to string automatically. So you can use, for example, an integer parameter:
   ```delphi
     [Get('/users/{AUserId}')]
     function GetUser(const AUserId: Integer): string;
@@ -135,6 +135,73 @@ The GRestService instance generates an implementation of IGitHubApi that interna
     end;
   end;
   ```
+  
+  #### Functional example
+  ```delphi
+  uses
+    iPub.Rtl.Refit;
+
+  type
+    TUser = record
+      Name: string;
+      Location: string;
+      Id: Integer;
+    end;
+
+    TRepository = record
+      Name: string;
+      Full_Name: string;
+      Fork: Boolean;
+      Description: string;
+    end;
+
+    TIssue = record
+    public
+      type
+        TUser = record
+          Login: string;
+          Id: Integer;
+        end;
+        TLabel = record
+          Name: string;
+          Color: string;
+        end;
+    public
+      Url: string;
+      Title: string;
+      User: TIssue.TUser;
+      Labels: TArray<TIssue.TLabel>;
+      State: string;
+      Body: string;
+    end;
+
+    [BaseUrl('https://api.github.com')]
+    IGithubApi = interface(IipRestApi)
+      ['{4C3B546F-216D-46D9-8E7D-0009C0771064}']
+      [Get('/users/{user}')]
+      function GetUser(const AUser: string): TUser;
+      [Get('/users/{user}/repos')]
+      function GetUserRepos(const AUser: string): TArray<TRepository>;
+      [Get('/repos/{repositoryOwner}/{repositoryName}/issues?page={page}')]
+      function GetRepositoryIssues(const ARepositoryOwner, ARepositoryName: string; APage: Integer = 1): TArray<TIssue>;
+      [Get('/repos/{repositoryOwner}/{repositoryName}/issues?page={page}&state=open')]
+      function GetRepositoryIssuesOpen(const ARepositoryOwner, ARepositoryName: string; APage: Integer = 1): TArray<TIssue>;
+    end;
+
+  procedure TForm1.FormCreate(Sender: TObject);
+  var
+    LGithubApi: IGithubApi;
+    LUser: TUser;
+    LRepos: TArray<TRepository>;
+    LIssues: TArray<TIssue>;
+  begin
+    LGithubApi := GRestService.&For<IGithubApi>;
+    LUser := LGithubApi.GetUser('viniciusfbb');
+    LRepos := LGithubApi.GetUserRepos('viniciusfbb');
+    LIssues := LGithubApi.GetRepositoryIssues('rails', 'rails');
+    LIssues := LGithubApi.GetRepositoryIssuesOpen('rails', 'rails', 2);
+  end;
+  ``` 
 
   #### Considerations
   This class and the rest api interfaces created by this class are thread safe.
