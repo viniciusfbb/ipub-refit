@@ -41,7 +41,7 @@ The GRestService instance generates an implementation of IGitHubApi that interna
   - The interface must have one IID (GUID).
     
   #### Methods
-  The methods of the rest api interface can be a procedure or a function returning a string, record, class, dynamic array of record or dinamic array of class. The method name don't matter. To declare you should declare an attribute informing the method kind and relative url
+  The methods of the rest api interface can be a procedure or a function returning a string, record, class, dynamic array of record or dynamic array of class. The method name don't matter. To declare you should declare an attribute informing the method kind and relative url
   You should declare the method kind of the interface method and the relative url
   ```delphi
   [Get('/users/{AUser}')]
@@ -54,7 +54,7 @@ The GRestService instance generates an implementation of IGitHubApi that interna
   The relative url can have masks {argument_name}, in anywhere and can repeat, to mark where an argument can be inserted. More details in the next topic.
 
   #### Methods arguments
-  In your rest api interface, the arguments name of methods will be used to replace the masks {argument_name} in relative url. In this step we permit case insentive names and names without the first letter A of argument names used commonly in delphi language. So, this cases will have the same result:
+  In your rest api interface, the arguments name of methods will be used to replace the masks {argument_name} in relative url. In this step we permit case insensitive names and names without the first letter A of argument names used commonly in delphi language. So, this cases will have the same result:
   ```delphi
     [Get('/users/{AUser}')]
     function GetUser(const AUser: string): TUser;
