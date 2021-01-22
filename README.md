@@ -1,7 +1,7 @@
 # iPub Refit
 <a href="https://www.embarcadero.com/products/delphi" title=""><img src="https://img.shields.io/static/v1?label=Delphi%20Supported%20Versions&message=10.2%2B&color=blueviolet&style=for-the-badge"></a> <a href="http://docwiki.embarcadero.com/PlatformStatus/en/Main_Page" title=""><img src="https://img.shields.io/static/v1?label=Supported%20platforms&message=Full%20Cross-Platform&color=blue&style=for-the-badge"></a>
 
-The iPub Refit is a library to facilitate to implement the existing REST APIs, declaring only one interface and is created by the iPub team.
+The iPub Refit is a library to consume REST services in a very simple way, declaring only one interface and is created by the iPub team.
 
 This project inspired / based on the existing [Refit in .Net], and it turns your REST API into a live interface:
 
