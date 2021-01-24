@@ -421,7 +421,7 @@ begin
   LHeaders := Copy(FHeaders);
   SetLength(LHeaders, Length(LHeaders) + Length(FHeaderParameters));
   for I := 0 to Length(FHeaderParameters)-1 do
-    LHeaders[Length(LHeaders) + I] := TNameValuePair.Create(FHeaderParameters[I].Name,
+    LHeaders[Length(FHeaders) + I] := TNameValuePair.Create(FHeaderParameters[I].Name,
       GetStringValue(AArgs[FHeaderParameters[I].ArgIndex], FHeaderParameters[I].Kind, FHeaderParameters[I].IsDateTime));
   LRelativeUrl := FRelativeUrl;
   for I := 0 to Length(FParameters)-1 do
