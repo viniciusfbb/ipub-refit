@@ -817,7 +817,7 @@ begin
   end;
   if LMethods.Count = 0 then
     raise EipRestService.Create('The interface type don''t have methods or {$M+} directive or is not descendent from IipRestApi');
-  if LIID.IsEmpty then
+  if LIID = LIID.Empty then
     raise EipRestService.Create('The interface type must have one GUID');
   Result := TApiType.Create(LBaseUrl, LIID, LMethods, ATypeInfo);
 end;
