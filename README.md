@@ -3,6 +3,8 @@
 
 The iPub Refit is a library to consume REST services in a very simple way, declaring only one interface and is created by the iPub team.
 
+You don't have to deal with string manipulation, url encoding, json manipulation, client settings. This is all done by us, you just need to declare the header of the api rest that will be consumed.
+
 This project inspired / based on the existing [Refit in .Net], and it turns your REST API into a live interface:
 
   ```delphi
@@ -21,7 +23,7 @@ This project inspired / based on the existing [Refit in .Net], and it turns your
     function GetUserJson(const AUser: string): string;
   end;
   ```
-  
+
 The GRestService instance generates an implementation of IGitHubApi that internally uses TNetHTTPClient to make its calls:
 
   ```delphi
@@ -51,10 +53,10 @@ The GRestService instance generates an implementation of IGitHubApi that interna
   ```
   All standard methods are supported (Get, Post, Delete, Options, Trace, Head, Put).
   
-  The relative url can have masks {argument_name}, in anywhere and can repeat, to mark where an argument can be inserted. More details in the next topic.
+  The relative url can have masks {argument_name/property_name}, in anywhere and can repeat, to mark where an argument or property can be inserted. More details in the next topic.
 
   #### Methods arguments
-  In your rest api interface, the arguments name of methods will be used to replace the masks {argument_name} in relative url. In this step we permit case insensitive names and names without the first letter A of argument names used commonly in delphi language. So, this cases will have the same result:
+  In your rest api interface, the arguments name of methods will be used to replace the masks {argument_name/property_name} in relative url. In this step we permit case insensitive names and names without the first letter A of argument names used commonly in delphi language. So, this cases will have the same result:
   ```delphi
     [Get('/users/{AUser}')]
     function GetUser(const AUser: string): TUser;
@@ -66,7 +68,7 @@ The GRestService instance generates an implementation of IGitHubApi that interna
     function GetUser(const AUser: string): TUser;
   ```
   If the argument name is ```Body```, ```ABody```, ```BodyContent```, ```ABodyContent```, ```Content``` or ```AContent```, the argument will be used as the body of the request. You can also declare other name and use the attribute [Body] in this argument. When a argument is a body, no matter the argument type, it will be casted to string. If it is a record or class, we will serialize it to a json automatically.
-  Remember that the mask {argument_name} in relative url, can be in anywhere, including inside queries, and can repeat.
+  Remember that the mask {argument_name/property_name} in relative url, can be in anywhere, including inside queries, and can repeat. In addition it will be automatically encoded, so your argument can be a string with spaces, for example.
   
   The type of the argument don't matter, we will cast to string automatically. So you can use, for example, an integer parameter:
   ```delphi
@@ -75,7 +77,6 @@ The GRestService instance generates an implementation of IGitHubApi that interna
   ```
 
   #### Base Url
-  
   You can declare optionally the base url using the attribute [BaseUrl('xxx')] before the interface:
   ```delphi
   [BaseUrl('https://api.github.com')]
@@ -89,7 +90,7 @@ The GRestService instance generates an implementation of IGitHubApi that interna
   ```
   
   #### Headers
-  You can declare the headers necessary in the api interface and method. To the declare static headers that will be used in all api call, just declare above the interface:
+  You can declare the headers necessary in the api interface and method. To the declare headers that will be used in all api call, just declare above the interface:
   ```delphi  
   [Headers('User-Agent', 'Awesome Octocat App')]
   [Headers('Header-A', '1')]
@@ -97,7 +98,7 @@ The GRestService instance generates an implementation of IGitHubApi that interna
     ['{4C3B546F-216D-46D9-8E7D-0009C0771064}']
   end;
   ```
-  To the declare static headers that will be used in one api method, just declare above the interface:
+  To the declare headers that will be used in one api method, just declare above the method:
   ```delphi  
   IGithubApi = interface(IipRestApi)
     ['{4C3B546F-216D-46D9-8E7D-0009C0771064}']
@@ -108,12 +109,41 @@ The GRestService instance generates an implementation of IGitHubApi that interna
   ```
   Note: you can declare many [Headers] attribute in one method or in one rest api interface.
   
-  But to declare dynamic headers, you will need to declare the [Header] attribute in the parameter declaration:
+  But to declare dynamic headers, that is, depending on arguments or properties, you can also use the {argument_name/property_name} mask on the header value. But there is also another exclusive option to declare a header using an argument directly. In this last case, you will need to declare the [Header] attribute in the parameter declaration:
   ```delphi
   IGithubApi = interface(IipRestApi)
     ['{4C3B546F-216D-46D9-8E7D-0009C0771064}']
     [Post('/users/{AUser}')]
     function GetUserJson(const AUser: string; [Header('Authorization')] const AAuthToken: string): string;
+  end;
+  ```
+  
+
+  #### Properties
+  In your rest api interface, you can also declare any kind of property, as long as it is for reading and writing and has getter and setter with the same name as the property just by adding "Get" and "Set" beforehand. Example:
+  ```delphi
+    [BaseUrl('https://maps.googleapis.com')]
+    IipGoogleGeocoding = interface(IipRestApi)
+      ['{668C5505-F90D-43C0-9545-038A86472666}']
+      [Get('/maps/api/geocode/json?address={AAddress}&key={ApiKey}')]
+      function AddressToGeolocation(const AAddress: string): string;
+      [Get('/maps/api/geocode/json?latlng={ALatitude},{ALongitude}&key={ApiKey}')]
+      function GeolocationToAddress(const ALatitude, ALongitude: Double): string;
+      function GetApiKey: string;
+      procedure SetApiKey(const AValue: string);
+      property ApiKey: string read GetApiKey write SetApiKey;
+    end;
+
+  procedure TForm1.FormCreate(Sender: TObject);
+  var
+    LGoogleGeocodingApi: IipGoogleGeocoding;
+    LGeolocationResponse: string;
+    LAddressResponse: string;
+  begin
+    LGoogleGeocodingApi := GRestService.&For<IipGoogleGeocoding>;
+    LGoogleGeocodingApi.ApiKey := 'XXXXXXX';
+    LGeolocationResponse := LGoogleGeocodingApi.AddressToGeolocation('Rua Alexandre Dumas, 1562, Chácara Santo Antônio, São Paulo - SP, Brasil');
+    LAddressResponse := LGoogleGeocodingApi.GeolocationToAddress(-23.6312393, -46.7058503);
   end;
   ```
   
