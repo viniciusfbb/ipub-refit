@@ -3,7 +3,7 @@
 
 The iPub Refit is a library to consume REST services in a very simple way, declaring only one interface and is created by the iPub team.
 
-You don't have to deal with string manipulation, url encoding, json manipulation, client settings. This is all done by us, you just need to declare the header of the api rest that will be consumed.
+You don't have to deal with string manipulation, url encoding, json manipulation, client settings. This is all done automatically by this library, you just need to declare the header of the api rest that will be consumed.
 
 This project inspired / based on the existing [Refit in .Net], and it turns your REST API into a live interface:
 

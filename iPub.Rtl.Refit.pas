@@ -79,12 +79,12 @@ type
     type
       TJsonConverterClass = class of TJsonConverter;
   protected
-    procedure MakeFor(const ATypeInfo: Pointer; const AClient: TNetHTTPClient; const ABaseUrl: string; out AResult); virtual; abstract;
+    procedure MakeFor(const ATypeInfo: Pointer; const AClient: TNetHTTPClient; const ABaseUrl: string; const AThreadSafe: Boolean; out AResult); virtual; abstract;
   public
     function &For<T: IInterface>: T; overload;
     function &For<T: IInterface>(const ABaseUrl: string): T; overload;
     // You can pass your own client, but you will be responsible for giving the client free after use the rest api interface returned
-    function &For<T: IInterface>(const AClient: TNetHTTPClient; const ABaseUrl: string = ''): T; overload;
+    function &For<T: IInterface>(const AClient: TNetHTTPClient; const ABaseUrl: string = ''; AThreadSafe: Boolean = True): T; overload;
     procedure RegisterConverters(const AConverterClasses: TArray<TJsonConverterClass>); virtual; abstract;
   end;
 
@@ -258,14 +258,14 @@ type
   strict private
     FApiType: IApiType;
     FBaseUrl: string;
-    FCallLock: TCriticalSection;
     FClient: TNetHTTPClient;
     FClientOwn: Boolean;
     FJsonSerializer: TApiJsonSerializer;
+    FLocker: TCriticalSection;
     FProperties: TArray<TValue>;
     procedure CallMethod(const AMethodHandle: Pointer; const AArgs: TArray<TValue>; var AResult: TValue);
   public
-    constructor Create(const AApiType: IApiType; const AConverters: TArray<TJsonConverter>; const AClient: TNetHTTPClient; const ABaseUrl: string);
+    constructor Create(const AApiType: IApiType; const AConverters: TArray<TJsonConverter>; const AClient: TNetHTTPClient; const ABaseUrl: string; const AThreadSafe: Boolean);
     destructor Destroy; override;
   end;
 
@@ -282,7 +282,7 @@ type
     {$ENDIF}
     function CreateApiType(const ATypeInfo: PTypeInfo): IApiType;
   protected
-    procedure MakeFor(const ATypeInfo: Pointer; const AClient: TNetHTTPClient; const ABaseUrl: string; out AResult); override;
+    procedure MakeFor(const ATypeInfo: Pointer; const AClient: TNetHTTPClient; const ABaseUrl: string; const AThreadSafe: Boolean; out AResult); override;
   public
     {$IF CompilerVersion < 34.0}
     constructor Create;
@@ -334,18 +334,18 @@ end;
 
 function TipRestService.&For<T>: T;
 begin
-  MakeFor(TypeInfo(T), nil, '', Result);
+  MakeFor(TypeInfo(T), nil, '', True, Result);
 end;
 
 function TipRestService.&For<T>(const ABaseUrl: string): T;
 begin
-  MakeFor(TypeInfo(T), nil, ABaseUrl, Result);
+  MakeFor(TypeInfo(T), nil, ABaseUrl, True, Result);
 end;
 
 function TipRestService.&For<T>(const AClient: TNetHTTPClient;
-  const ABaseUrl: string): T;
+  const ABaseUrl: string; AThreadSafe: Boolean): T;
 begin
-  MakeFor(TypeInfo(T), AClient, ABaseUrl, Result);
+  MakeFor(TypeInfo(T), AClient, ABaseUrl, AThreadSafe, Result);
 end;
 
 { TRttiUtils }
@@ -455,7 +455,7 @@ end;
 
 function TipJsonEnumConverter.CanConvert(ATypeInf: PTypeInfo): Boolean;
 begin
-  Result := (ATypeInf.Kind = TTypeKind.tkEnumeration) and (ATypeInf <> TypeInfo(Boolean));
+  Result := (ATypeInf.Kind = TTypeKind.tkEnumeration) and (ATypeInf <> TypeInfo(Boolean)) and (ATypeInf.TypeData <> nil);
 end;
 
 function TipJsonEnumConverter.ReadJson(const AReader: TJsonReader;
@@ -464,13 +464,16 @@ function TipJsonEnumConverter.ReadJson(const AReader: TJsonReader;
 begin
   Result := AReader.Value;
   if not Result.IsOrdinal then
-    Result := TValue.FromOrdinal(AExistingValue.TypeInfo, GetEnumValue(AExistingValue.TypeInfo, Result.AsString));
+    Result := TValue.FromOrdinal(ATypeInf, GetEnumValue(ATypeInf, Result.AsString));
 end;
 
 procedure TipJsonEnumConverter.WriteJson(const AWriter: TJsonWriter;
   const AValue: TValue; const ASerializer: TJsonSerializer);
 begin
-  AWriter.WriteValue(GetEnumName(AValue.TypeInfo, AValue.AsOrdinal));
+  if (AValue.AsOrdinal < AValue.TypeData.MinValue) or (AValue.AsOrdinal > AValue.TypeData.MaxValue) then
+    AWriter.WriteNull
+  else
+    AWriter.WriteValue(GetEnumName(AValue.TypeInfo, AValue.AsOrdinal));
 end;
 
 { TipJsonSetConverter }
@@ -901,7 +904,8 @@ var
 begin
   if FApiType.Methods.TryGetValue(AMethodHandle, LMethod) then
   begin
-    FCallLock.Enter;
+    if Assigned(FLocker) then
+      FLocker.Enter;
     try
       LAccept := FClient.Accept;
       LAcceptCharSet := FClient.AcceptCharSet;
@@ -926,16 +930,19 @@ begin
         FClient.ResponseTimeout := LResponseTimeout;
       end;
     finally
-      FCallLock.Leave;
+      if Assigned(FLocker) then
+        FLocker.Leave;
     end;
   end
   else if FApiType.PropertiesMethods.TryGetValue(AMethodHandle, LProperty) then
   begin
-    FCallLock.Enter;
+    if Assigned(FLocker) then
+      FLocker.Enter;
     try
       LProperty.CallMethod(AMethodHandle, AArgs, AResult, FProperties);
     finally
-      FCallLock.Leave;
+      if Assigned(FLocker) then
+        FLocker.Leave;
     end;
   end
   else
@@ -944,7 +951,7 @@ end;
 
 constructor TApiVirtualInterface.Create(const AApiType: IApiType;
   const AConverters: TArray<TJsonConverter>; const AClient: TNetHTTPClient;
-  const ABaseUrl: string);
+  const ABaseUrl: string; const AThreadSafe: Boolean);
 var
   I: Integer;
 begin
@@ -953,7 +960,8 @@ begin
     begin
       TApiVirtualInterface(AArgs[0].AsInterface).CallMethod(AMethod.Handle, AArgs, AResult);
     end);
-  FCallLock := TCriticalSection.Create;
+  if AThreadSafe then
+    FLocker := TCriticalSection.Create;
   FApiType := AApiType;
   FBaseUrl := ABaseUrl.Trim;
   if FBaseUrl.IsEmpty then
@@ -979,7 +987,8 @@ end;
 
 destructor TApiVirtualInterface.Destroy;
 begin
-  FCallLock.Free;
+  if Assigned(FLocker) then
+    FLocker.Free;
   if FClientOwn then
     FClient.Free;
   FJsonSerializer.Free;
@@ -1120,7 +1129,7 @@ begin
 end;
 
 procedure TRestServiceManager.MakeFor(const ATypeInfo: Pointer;
-  const AClient: TNetHTTPClient; const ABaseUrl: string; out AResult);
+  const AClient: TNetHTTPClient; const ABaseUrl: string; const AThreadSafe: Boolean; out AResult);
 var
   LInterface: IInterface;
   LApiType: IApiType;
@@ -1175,7 +1184,7 @@ begin
     end;
   end;
 
-  LInterface := TApiVirtualInterface.Create(LApiType, LConverters, AClient, ABaseUrl);
+  LInterface := TApiVirtualInterface.Create(LApiType, LConverters, AClient, ABaseUrl, AThreadSafe);
   if not Supports(LInterface, LApiType.IID, AResult) then
     raise EipRestService.Create('Unexpected error creating the service');
 end;
