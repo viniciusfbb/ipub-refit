@@ -101,6 +101,7 @@ uses
   System.TypInfo,
   System.Generics.Collections,
   System.SyncObjs,
+  System.JSON.Types,
   System.JSON.Writers,
   System.JSON.Readers,
   System.Net.HttpClient,
@@ -114,7 +115,9 @@ type
   TRttiUtils = class sealed
   public
     class function Attributes<T: TCustomAttribute>(const AAttributes: TArray<TCustomAttribute>): TArray<T>; static;
-    class function HasAttribute<T: TCustomAttribute>(const AAttributes: TArray<TCustomAttribute>; out AAttribute: T): Boolean; static;
+    class function HasAttribute<T: TCustomAttribute>(const AAttributes: TArray<TCustomAttribute>): Boolean; overload; static;
+    class function HasAttribute<T: TCustomAttribute>(const AAttributes: TArray<TCustomAttribute>; out AAttribute: T): Boolean; overload; static;
+    class function IsDateTime(const ATypeInfo: PTypeInfo): Boolean; static;
   end;
 
   { TApiJsonSerializer }
@@ -123,6 +126,26 @@ type
   public
     function Deserialize(const AJson: string; const ATypeInfo: PTypeInfo): TValue; overload;
     function Serialize(const AValue: TValue): string; overload;
+  end;
+
+  { TipJsonEnumConverter }
+
+  TipJsonEnumConverter = class(TJsonConverter)
+  public
+    function CanConvert(ATypeInf: PTypeInfo): Boolean; override;
+    function ReadJson(const AReader: TJsonReader; ATypeInf: PTypeInfo; const AExistingValue: TValue;
+      const ASerializer: TJsonSerializer): TValue; override;
+    procedure WriteJson(const AWriter: TJsonWriter; const AValue: TValue; const ASerializer: TJsonSerializer); override;
+  end;
+
+  { TipJsonSetConverter }
+
+  TipJsonSetConverter = class(TJsonConverter)
+  public
+    function CanConvert(ATypeInf: PTypeInfo): Boolean; override;
+    function ReadJson(const AReader: TJsonReader; ATypeInf: PTypeInfo; const AExistingValue: TValue;
+      const ASerializer: TJsonSerializer): TValue; override;
+    procedure WriteJson(const AWriter: TJsonWriter; const AValue: TValue; const ASerializer: TJsonSerializer); override;
   end;
 
   { TApiParam }
@@ -139,6 +162,30 @@ type
     property IsDateTime: Boolean read FIsDateTime;
     property Kind: TTypeKind read FKind;
     property Name: string read FName;
+  end;
+
+  { TApiProperty }
+
+  TApiProperty = class
+  strict private
+    FDefaultValue: TValue;
+    FGetMethod: Pointer;
+    FIndex: Integer;
+    FIsDateTime: Boolean;
+    FKind: TTypeKind;
+    FName: string;
+    FSetMethod: Pointer;
+  public
+    constructor Create(const AGetMethod, ASetMethod: TRttiMethod; const AIndex: Integer);
+    procedure CallMethod(const AMethodHandle: Pointer; const AArgs: TArray<TValue>;
+      var AResult: TValue; var AProperties: TArray<TValue>);
+    function GetValue(const AProperties: TArray<TValue>): TValue;
+    property DefaultValue: TValue read FDefaultValue;
+    property GetMethod: Pointer read FGetMethod;
+    property IsDateTime: Boolean read FIsDateTime;
+    property Kind: TTypeKind read FKind;
+    property Name: string read FName;
+    property SetMethod: Pointer read FSetMethod;
   end;
 
   { TApiMethod }
@@ -162,7 +209,8 @@ type
     destructor Destroy; override;
     procedure CallApi(const AClient: TNetHTTPClient; const ABaseUrl: string;
       const AJsonSerializer: TApiJsonSerializer; const AArgs: TArray<TValue>;
-      var AResult: TValue);
+      var AResult: TValue; const AProperties: TObjectList<TApiProperty>;
+      const APropertiesValues: TArray<TValue>);
   end;
 
   { IApiType }
@@ -171,10 +219,14 @@ type
     function GetBaseUrl: string;
     function GetIID: TGUID;
     function GetMethods: TObjectDictionary<Pointer, TApiMethod>;
+    function GetProperties: TObjectList<TApiProperty>;
+    function GetPropertiesMethods: TDictionary<Pointer, TApiProperty>;
     function GetTypeInfo: PTypeInfo;
     property BaseUrl: string read GetBaseUrl;
     property IID: TGUID read GetIID;
     property Methods: TObjectDictionary<Pointer, TApiMethod> read GetMethods;
+    property Properties: TObjectList<TApiProperty> read GetProperties;
+    property PropertiesMethods: TDictionary<Pointer, TApiProperty> read GetPropertiesMethods;
     property TypeInfo: PTypeInfo read GetTypeInfo;
   end;
 
@@ -185,13 +237,18 @@ type
     FBaseUrl: string;
     FIID: TGUID;
     FMethods: TObjectDictionary<Pointer, TApiMethod>;
+    FProperties: TObjectList<TApiProperty>;
+    FPropertiesMethods: TDictionary<Pointer, TApiProperty>;
     FTypeInfo: PTypeInfo;
     function GetBaseUrl: string;
     function GetIID: TGUID;
     function GetMethods: TObjectDictionary<Pointer, TApiMethod>;
+    function GetProperties: TObjectList<TApiProperty>;
+    function GetPropertiesMethods: TDictionary<Pointer, TApiProperty>;
     function GetTypeInfo: PTypeInfo;
   public
-    constructor Create(const ABaseUrl: string; const AIID: TGUID; const AMethods: TObjectDictionary<Pointer, TApiMethod>; const ATypeInfo: PTypeInfo);
+    constructor Create(const ABaseUrl: string; const AIID: TGUID; const AMethods: TObjectDictionary<Pointer, TApiMethod>;
+      const AProperties: TObjectList<TApiProperty>; const APropertiesMethods: TDictionary<Pointer, TApiProperty>; const ATypeInfo: PTypeInfo);
     destructor Destroy; override;
   end;
 
@@ -205,7 +262,8 @@ type
     FClient: TNetHTTPClient;
     FClientOwn: Boolean;
     FJsonSerializer: TApiJsonSerializer;
-    procedure CallApi(const AMethodHandle: Pointer; const AArgs: TArray<TValue>; var AResult: TValue);
+    FProperties: TArray<TValue>;
+    procedure CallMethod(const AMethodHandle: Pointer; const AArgs: TArray<TValue>; var AResult: TValue);
   public
     constructor Create(const AApiType: IApiType; const AConverters: TArray<TJsonConverter>; const AClient: TNetHTTPClient; const ABaseUrl: string);
     destructor Destroy; override;
@@ -311,6 +369,17 @@ begin
 end;
 
 class function TRttiUtils.HasAttribute<T>(
+  const AAttributes: TArray<TCustomAttribute>): Boolean;
+var
+  I: Integer;
+begin
+  for I := 0 to Length(AAttributes)-1 do
+    if AAttributes[I] is T then
+      Exit(True);
+  Result := False;
+end;
+
+class function TRttiUtils.HasAttribute<T>(
   const AAttributes: TArray<TCustomAttribute>; out AAttribute: T): Boolean;
 var
   I: Integer;
@@ -323,6 +392,12 @@ begin
     end;
   AAttribute := nil;
   Result := False;
+end;
+
+class function TRttiUtils.IsDateTime(const ATypeInfo: PTypeInfo): Boolean;
+begin
+  Result := (ATypeInfo = System.TypeInfo(TDate)) or
+    (ATypeInfo = System.TypeInfo(TDateTime)) or (ATypeInfo = System.TypeInfo(TTime));
 end;
 
 { TApiJsonSerializer }
@@ -376,6 +451,78 @@ begin
   end;
 end;
 
+{ TipJsonEnumConverter }
+
+function TipJsonEnumConverter.CanConvert(ATypeInf: PTypeInfo): Boolean;
+begin
+  Result := (ATypeInf.Kind = TTypeKind.tkEnumeration) and (ATypeInf <> TypeInfo(Boolean));
+end;
+
+function TipJsonEnumConverter.ReadJson(const AReader: TJsonReader;
+  ATypeInf: PTypeInfo; const AExistingValue: TValue;
+  const ASerializer: TJsonSerializer): TValue;
+begin
+  Result := AReader.Value;
+  if not Result.IsOrdinal then
+    Result := TValue.FromOrdinal(AExistingValue.TypeInfo, GetEnumValue(AExistingValue.TypeInfo, Result.AsString));
+end;
+
+procedure TipJsonEnumConverter.WriteJson(const AWriter: TJsonWriter;
+  const AValue: TValue; const ASerializer: TJsonSerializer);
+begin
+  AWriter.WriteValue(GetEnumName(AValue.TypeInfo, AValue.AsOrdinal));
+end;
+
+{ TipJsonSetConverter }
+
+function TipJsonSetConverter.CanConvert(ATypeInf: PTypeInfo): Boolean;
+begin
+  Result := (ATypeInf.Kind = TTypeKind.tkSet);
+end;
+
+function TipJsonSetConverter.ReadJson(const AReader: TJsonReader;
+  ATypeInf: PTypeInfo; const AExistingValue: TValue;
+  const ASerializer: TJsonSerializer): TValue;
+var
+  LSetString: string;
+  LString: string;
+begin
+  if AReader.TokenType = TJsonToken.StartArray then
+  begin
+    LSetString := '';
+    while AReader.Read and (AReader.TokenType <> TJsonToken.EndArray) do
+    begin
+      Result := AReader.Value;
+      if AReader.TokenType = TJsonToken.String then
+        LString := Result.AsString
+      else
+        LString := Result.AsOrdinal.ToString;
+      if LString.IsEmpty then
+        Continue;
+      if not LSetString.IsEmpty then
+        LSetString := LSetString + ',';
+      LSetString := LSetString + LString;
+    end;
+    Result := AExistingValue;
+    StringToSet(Result.TypeInfo, LSetString, Result.GetReferenceToRawData);
+  end
+  else
+    Result := AReader.Value;
+end;
+
+procedure TipJsonSetConverter.WriteJson(const AWriter: TJsonWriter;
+  const AValue: TValue; const ASerializer: TJsonSerializer);
+var
+  LStrings: TArray<string>;
+  LString: string;
+begin
+  AWriter.WriteStartArray;
+  LStrings := SetToString(AValue.TypeInfo, AValue.GetReferenceToRawData).Split([',']);
+  for LString in LStrings do
+    AWriter.WriteValue(LString);
+  AWriter.WriteEndArray;
+end;
+
 { TApiParam }
 
 constructor TApiParam.Create(const AArgIndex: Integer; const AIsDateTime: Boolean; const AKind: TTypeKind;
@@ -391,7 +538,9 @@ end;
 { TApiMethod }
 
 procedure TApiMethod.CallApi(const AClient: TNetHTTPClient; const ABaseUrl: string;
-  const AJsonSerializer: TApiJsonSerializer; const AArgs: TArray<TValue>; var AResult: TValue);
+  const AJsonSerializer: TApiJsonSerializer; const AArgs: TArray<TValue>;
+  var AResult: TValue; const AProperties: TObjectList<TApiProperty>;
+  const APropertiesValues: TArray<TValue>);
 
   function GetStringValue(const AValue: TValue; const ATypeKind: TTypeKind; const AIsDateTime: Boolean): string; inline;
   begin
@@ -410,6 +559,7 @@ procedure TApiMethod.CallApi(const AClient: TNetHTTPClient; const ABaseUrl: stri
 
 var
   I: Integer;
+  J: Integer;
   LRelativeUrl: string;
   LArgumentAsString: string;
   LResponse: IHTTPResponse;
@@ -417,17 +567,53 @@ var
   LBodyContent: TStringList;
   LResponseString: string;
   LHeaders: TNameValueArray;
+  LStr: string;
 begin
   LHeaders := Copy(FHeaders);
   SetLength(LHeaders, Length(LHeaders) + Length(FHeaderParameters));
   for I := 0 to Length(FHeaderParameters)-1 do
     LHeaders[Length(FHeaders) + I] := TNameValuePair.Create(FHeaderParameters[I].Name,
       GetStringValue(AArgs[FHeaderParameters[I].ArgIndex], FHeaderParameters[I].Kind, FHeaderParameters[I].IsDateTime));
+  // Find and filling the masks of header values
+  for I := 0 to Length(FHeaders)-1 do
+  begin
+    LStr := LHeaders[I].Value.ToLower;
+    for J := 0 to Length(FParameters)-1 do
+    begin
+      if LStr.Contains('{' + FParameters[J].Name.ToLower + '}') then
+      begin
+        LArgumentAsString := GetStringValue(AArgs[FParameters[J].ArgIndex], FParameters[J].Kind, FParameters[J].IsDateTime);
+        LHeaders[I].Value := LHeaders[I].Value.Replace('{' + FParameters[J].Name + '}', TNetEncoding.URL.EncodeForm(LArgumentAsString), [rfReplaceAll, rfIgnoreCase]);
+      end;
+      if LStr.Contains('{a' + FParameters[J].Name.ToLower + '}') then
+      begin
+        LArgumentAsString := GetStringValue(AArgs[FParameters[J].ArgIndex], FParameters[J].Kind, FParameters[J].IsDateTime);
+        LHeaders[I].Value := LHeaders[I].Value.Replace('{a' + FParameters[J].Name + '}', TNetEncoding.URL.EncodeForm(LArgumentAsString), [rfReplaceAll, rfIgnoreCase]);
+      end;
+    end;
+    for J := 0 to AProperties.Count-1 do
+    begin
+      if LStr.Contains('{' + AProperties[J].Name + '}') then
+      begin
+        LArgumentAsString := GetStringValue(AProperties[J].GetValue(APropertiesValues), AProperties[J].Kind, AProperties[J].IsDateTime);
+        LHeaders[I].Value := LHeaders[I].Value.Replace('{' + AProperties[J].Name + '}', TNetEncoding.URL.EncodeForm(LArgumentAsString), [rfReplaceAll, rfIgnoreCase]);
+      end;
+    end;
+  end;
   LRelativeUrl := FRelativeUrl;
   for I := 0 to Length(FParameters)-1 do
   begin
     LArgumentAsString := GetStringValue(AArgs[FParameters[I].ArgIndex], FParameters[I].Kind, FParameters[I].IsDateTime);
     LRelativeUrl := LRelativeUrl.Replace('{' + FParameters[I].Name + '}', TNetEncoding.URL.EncodeForm(LArgumentAsString), [rfReplaceAll]);
+  end;
+  LStr := LRelativeUrl.ToLower;
+  for I := 0 to AProperties.Count-1 do
+  begin
+    if LStr.Contains('{' + AProperties[I].Name + '}') then
+    begin
+      LArgumentAsString := GetStringValue(AProperties[I].GetValue(APropertiesValues), AProperties[I].Kind, AProperties[I].IsDateTime);
+      LRelativeUrl := LRelativeUrl.Replace('{' + AProperties[I].Name + '}', TNetEncoding.URL.EncodeForm(LArgumentAsString), [rfReplaceAll, rfIgnoreCase]);
+    end;
   end;
   if FKind in CMethodsWithBodyContent then
     LBodyContent := TStringList.Create
@@ -497,8 +683,6 @@ constructor TApiMethod.Create(const AQualifiedName: string;
   const ARttiReturnType: TRttiType; const AAttributes: TArray<TCustomAttribute>);
 
   function IsBodyParam(const AName: string; const AAttributtes: TArray<TCustomAttribute>): Boolean;
-  var
-    LBodyAttribute: BodyAttribute;
   begin
     Result := (AName = 'abody') or
       (AName = 'body') or
@@ -507,13 +691,7 @@ constructor TApiMethod.Create(const AQualifiedName: string;
       (AName = 'content') or
       (AName = 'acontent');
     if not Result then
-      Result := TRttiUtils.HasAttribute<BodyAttribute>(AAttributtes, LBodyAttribute);
-  end;
-
-  function IsDateTime(const ATypeInfo: PTypeInfo): Boolean; inline;
-  begin
-    Result := (ATypeInfo = System.TypeInfo(TDate)) or
-      (ATypeInfo = System.TypeInfo(TDateTime)) or (ATypeInfo = System.TypeInfo(TTime));
+      Result := TRttiUtils.HasAttribute<BodyAttribute>(AAttributtes);
   end;
 
   function FixName(const AName: string; var ARelativeUrl: string): string;
@@ -538,7 +716,6 @@ var
   LFoundMethodKind: Boolean;
   LIsDateTime: Boolean;
   LHeadersAttributes: TArray<HeadersAttribute>;
-  LHeadersAttribute: HeadersAttribute;
   LHeaderAttribute: HeaderAttribute;
   I: Integer;
 begin
@@ -593,9 +770,9 @@ begin
   begin
     if ARttiParameters[I].ParamType = nil then
       raise EipRestService.CreateFmt('Argument %s have a invalid type in method %s', [ARttiParameters[I].Name, FQualifiedName]);
-    if TRttiUtils.HasAttribute<HeadersAttribute>(ARttiParameters[I].GetAttributes, LHeadersAttribute) then
+    if TRttiUtils.HasAttribute<HeadersAttribute>(ARttiParameters[I].GetAttributes) then
       raise EipRestService.CreateFmt('Argument %s have a invalid type in method %s', [ARttiParameters[I].Name, FQualifiedName]);
-    LIsDateTime := IsDateTime(ARttiParameters[I].ParamType.Handle);
+    LIsDateTime := TRttiUtils.IsDateTime(ARttiParameters[I].ParamType.Handle);
     if TRttiUtils.HasAttribute<HeaderAttribute>(ARttiParameters[I].GetAttributes, LHeaderAttribute) then
     begin
       SetLength(FHeaderParameters, Length(FHeaderParameters) + 1);
@@ -639,7 +816,7 @@ begin
       raise EipRestService.CreateFmt('The result type in %s method is not allowed', [FQualifiedName]);
     end;
     FResultTypeInfo := ARttiReturnType.Handle;
-    FResultIsDateTime := IsDateTime(ARttiReturnType.Handle);
+    FResultIsDateTime := TRttiUtils.IsDateTime(ARttiReturnType.Handle);
   end;
 end;
 
@@ -657,17 +834,23 @@ end;
 { TApiType }
 
 constructor TApiType.Create(const ABaseUrl: string; const AIID: TGUID;
-  const AMethods: TObjectDictionary<Pointer, TApiMethod>; const ATypeInfo: PTypeInfo);
+  const AMethods: TObjectDictionary<Pointer, TApiMethod>;
+  const AProperties: TObjectList<TApiProperty>;
+  const APropertiesMethods: TDictionary<Pointer, TApiProperty>; const ATypeInfo: PTypeInfo);
 begin
   inherited Create;
   FBaseUrl := ABaseUrl;
   FIID := AIID;
   FMethods := AMethods;
+  FProperties := AProperties;
+  FPropertiesMethods := APropertiesMethods;
   FTypeInfo := ATypeInfo;
 end;
 
 destructor TApiType.Destroy;
 begin
+  FProperties.Free;
+  FPropertiesMethods.Free;
   FMethods.Free;
   inherited;
 end;
@@ -687,6 +870,16 @@ begin
   Result := FMethods;
 end;
 
+function TApiType.GetProperties: TObjectList<TApiProperty>;
+begin
+  Result := FProperties;
+end;
+
+function TApiType.GetPropertiesMethods: TDictionary<Pointer, TApiProperty>;
+begin
+  Result := FPropertiesMethods;
+end;
+
 function TApiType.GetTypeInfo: PTypeInfo;
 begin
   Result := FTypeInfo;
@@ -694,40 +887,71 @@ end;
 
 { TApiVirtualInterface }
 
-procedure TApiVirtualInterface.CallApi(const AMethodHandle: Pointer;
+procedure TApiVirtualInterface.CallMethod(const AMethodHandle: Pointer;
   const AArgs: TArray<TValue>; var AResult: TValue);
 var
   LAccept: string;
+  LAcceptCharSet: string;
+  LConnectionTimeout: Integer;
+  LHandleRedirects: Boolean;
+  LResponseTimeout: Integer;
   LAsync: Boolean;
   LMethod: TApiMethod;
+  LProperty: TApiProperty;
 begin
-  if not FApiType.Methods.TryGetValue(AMethodHandle, LMethod) then
-    raise EipRestService.Create('Unexpected error calling the api');
-  FCallLock.Enter;
-  try
-    LAccept := FClient.Accept;
-    LAsync := FClient.Asynchronous;
-    FClient.Accept := 'application/json';
-    FClient.Asynchronous := False;
+  if FApiType.Methods.TryGetValue(AMethodHandle, LMethod) then
+  begin
+    FCallLock.Enter;
     try
-      LMethod.CallApi(FClient, FBaseUrl, FJsonSerializer, AArgs, AResult);
+      LAccept := FClient.Accept;
+      LAcceptCharSet := FClient.AcceptCharSet;
+      LConnectionTimeout := FClient.ConnectionTimeout;
+      LHandleRedirects := FClient.HandleRedirects;
+      LResponseTimeout := FClient.ResponseTimeout;
+      LAsync := FClient.Asynchronous;
+      FClient.Accept := 'application/json';
+      FClient.AcceptCharSet := 'UTF-8';
+      FClient.ConnectionTimeout := 10000;
+      FClient.HandleRedirects := False;
+      FClient.ResponseTimeout := 10000;
+      FClient.Asynchronous := False;
+      try
+        LMethod.CallApi(FClient, FBaseUrl, FJsonSerializer, AArgs, AResult, FApiType.Properties, FProperties);
+      finally
+        FClient.Asynchronous := LAsync;
+        FClient.Accept := LAccept;
+        FClient.AcceptCharSet := LAcceptCharSet;
+        FClient.ConnectionTimeout := LConnectionTimeout;
+        FClient.HandleRedirects := LHandleRedirects;
+        FClient.ResponseTimeout := LResponseTimeout;
+      end;
     finally
-      FClient.Asynchronous := LAsync;
-      FClient.Accept := LAccept;
+      FCallLock.Leave;
     end;
-  finally
-    FCallLock.Leave;
-  end;
+  end
+  else if FApiType.PropertiesMethods.TryGetValue(AMethodHandle, LProperty) then
+  begin
+    FCallLock.Enter;
+    try
+      LProperty.CallMethod(AMethodHandle, AArgs, AResult, FProperties);
+    finally
+      FCallLock.Leave;
+    end;
+  end
+  else
+    raise EipRestService.Create('Unexpected error calling the api');
 end;
 
 constructor TApiVirtualInterface.Create(const AApiType: IApiType;
   const AConverters: TArray<TJsonConverter>; const AClient: TNetHTTPClient;
   const ABaseUrl: string);
+var
+  I: Integer;
 begin
   inherited Create(AApiType.TypeInfo,
     procedure(AMethod: TRttiMethod; const AArgs: TArray<TValue>; out AResult: TValue)
     begin
-      TApiVirtualInterface(AArgs[0].AsInterface).CallApi(AMethod.Handle, AArgs, AResult);
+      TApiVirtualInterface(AArgs[0].AsInterface).CallMethod(AMethod.Handle, AArgs, AResult);
     end);
   FCallLock := TCriticalSection.Create;
   FApiType := AApiType;
@@ -748,6 +972,9 @@ begin
     FClient := TNetHTTPClient.Create(nil);
     FClientOwn := True;
   end;
+  SetLength(FProperties, FApiType.Properties.Count);
+  for I := 0 to Length(FProperties)-1 do
+    FProperties[I] := FApiType.Properties[I].DefaultValue;
 end;
 
 destructor TApiVirtualInterface.Destroy;
@@ -777,14 +1004,21 @@ var
   LRttiType: TRttiType;
   LRttiMethods: TArray<TRttiMethod>;
   LRttiMethod: TRttiMethod;
+  LRttiPropertiesMethods: TList<TRttiMethod>;
+  LAttributes: TArray<TCustomAttribute>;
   LMethods: TObjectDictionary<Pointer, TApiMethod>;
   LInterfaceHeaders: TNameValueArray;
   LHeadersAttributes: TArray<HeadersAttribute>;
+  LProperties: TObjectList<TApiProperty>;
+  LPropertiesMethods: TDictionary<Pointer, TApiProperty>;
+  LFound: Boolean;
   LIID: TGUID;
   LBaseUrl: string;
   I: Integer;
 begin
   LMethods := TObjectDictionary<Pointer, TApiMethod>.Create([doOwnsValues]);
+  LProperties := TObjectList<TApiProperty>.Create(True);
+  LPropertiesMethods := TDictionary<Pointer, TApiProperty>.Create;
   LContext := TRttiContext.Create;
   try
     LRttiType := LContext.GetType(ATypeInfo);
@@ -802,24 +1036,75 @@ begin
     for I := 0 to Length(LHeadersAttributes)-1 do
       LInterfaceHeaders[I] := TNameValuePair.Create(LHeadersAttributes[I].Name, LHeadersAttributes[I].Value);
 
-    repeat
+    LRttiPropertiesMethods := TList<TRttiMethod>.Create;
+    try
       LRttiMethods := LRttiType.GetMethods;
       for LRttiMethod in LRttiMethods do
       begin
         if LMethods.ContainsKey(LRttiMethod.Handle) then
           raise EipRestService.Create('Unexpected error adding two duplicated methods');
-        LMethods.Add(LRttiMethod.Handle, TApiMethod.Create(LRttiType.Name + '.' + LRttiMethod.Name, LInterfaceHeaders, LRttiMethod.GetParameters, LRttiMethod.ReturnType, LRttiMethod.GetAttributes));
+        LAttributes := LRttiMethod.GetAttributes;
+        if TRttiUtils.HasAttribute<TipUrlAttribute>(LAttributes) then
+          LMethods.Add(LRttiMethod.Handle, TApiMethod.Create(LRttiMethod.Parent.Name + '.' + LRttiMethod.Name, LInterfaceHeaders, LRttiMethod.GetParameters, LRttiMethod.ReturnType, LAttributes))
+        else if (LRttiMethod.MethodKind = System.TypInfo.TMethodKind.mkProcedure) and
+          (LRttiMethod.Name.StartsWith('Set', True)) and (LRttiMethod.Name.Length > 3) and
+          (Length(LRttiMethod.GetParameters) = 1)  then
+        begin
+          LRttiPropertiesMethods.Add(LRttiMethod);
+        end
+        else if (LRttiMethod.MethodKind = System.TypInfo.TMethodKind.mkFunction) and
+          (LRttiMethod.Name.StartsWith('Get', True)) and (LRttiMethod.Name.Length > 3) and
+          (Length(LRttiMethod.GetParameters) = 0)  then
+        begin
+          LRttiPropertiesMethods.Add(LRttiMethod);
+        end
+        else
+          raise EipRestService.CreateFmt('Invalid method %s', [LRttiMethod.Name]);
       end;
-      LRttiType := LRttiType.BaseType;
-    until LRttiType = nil;
+
+      while LRttiPropertiesMethods.Count > 1 do
+      begin
+        LFound := False;
+        for I := 1 to LRttiPropertiesMethods.Count-1 do
+        begin
+          if LRttiPropertiesMethods[I].Name.Substring(3).ToLower = LRttiPropertiesMethods[0].Name.SubString(3).ToLower then
+          begin
+            // Rare case but possible, when have 2 methods with same name and with overload
+            if LRttiPropertiesMethods[I].Name.ToLower = LRttiPropertiesMethods[0].Name.ToLower then
+              raise EipRestService.CreateFmt('Invalid method %s', [LRttiPropertiesMethods[0].Name]);
+            if LRttiPropertiesMethods[0].MethodKind = System.TypInfo.TMethodKind.mkFunction then
+              LProperties.Add(TApiProperty.Create(LRttiPropertiesMethods[0], LRttiPropertiesMethods[I], LProperties.Count))
+            else
+              LProperties.Add(TApiProperty.Create(LRttiPropertiesMethods[I], LRttiPropertiesMethods[0], LProperties.Count));
+            LRttiPropertiesMethods.Delete(I);
+            LRttiPropertiesMethods.Delete(0);
+            LFound := True;
+            Break;
+          end;
+        end;
+        if not LFound then
+          raise EipRestService.CreateFmt('Invalid method %s', [LRttiPropertiesMethods[0].Name]);
+      end;
+      if LRttiPropertiesMethods.Count > 0 then
+        raise EipRestService.CreateFmt('Invalid method %s', [LRttiPropertiesMethods[0].Name]);
+    finally
+      LRttiPropertiesMethods.Free;
+    end;
+    for I := 0 to LProperties.Count-1 do
+    begin
+      if LPropertiesMethods.ContainsKey(LProperties[I].GetMethod) or LPropertiesMethods.ContainsKey(LProperties[I].SetMethod) then
+        raise EipRestService.Create('Cannot possible to have properties with same read or write methods');
+      LPropertiesMethods.Add(LProperties[I].GetMethod, LProperties[I]);
+      LPropertiesMethods.Add(LProperties[I].SetMethod, LProperties[I]);
+    end;
   finally
     LContext.Free;
   end;
   if LMethods.Count = 0 then
     raise EipRestService.Create('The interface type don''t have methods or {$M+} directive or is not descendent from IipRestApi');
-  if LIID = LIID.Empty then
+  if LIID = TGUID.Empty then
     raise EipRestService.Create('The interface type must have one GUID');
-  Result := TApiType.Create(LBaseUrl, LIID, LMethods, ATypeInfo);
+  Result := TApiType.Create(LBaseUrl, LIID, LMethods, LProperties, LPropertiesMethods, ATypeInfo);
 end;
 
 destructor TRestServiceManager.Destroy;
@@ -908,8 +1193,8 @@ begin
   try
     if not Assigned(FConvertersList) then
       FConvertersList := TObjectList<TJsonConverter>.Create(True);
-    for I := 0 to Length(AConverterClasses)-1 do
-      FConvertersList.Add(AConverterClasses[I].Create);
+    for I := Length(AConverterClasses)-1 downto 0 do
+      FConvertersList.Insert(0, AConverterClasses[I].Create);
   finally
     {$IF CompilerVersion >= 34.0}
     FLock.EndWrite;
@@ -919,8 +1204,41 @@ begin
   end;
 end;
 
+{ TApiProperty }
+
+procedure TApiProperty.CallMethod(const AMethodHandle: Pointer;
+  const AArgs: TArray<TValue>; var AResult: TValue;
+  var AProperties: TArray<TValue>);
+begin
+  if AMethodHandle = FGetMethod then
+    AResult := GetValue(AProperties)
+  else
+    AProperties[FIndex] := AArgs[1];
+end;
+
+constructor TApiProperty.Create(const AGetMethod, ASetMethod: TRttiMethod;
+  const AIndex: Integer);
+begin
+  inherited Create;
+  if AGetMethod.ReturnType.Handle <> ASetMethod.GetParameters[0].ParamType.Handle then
+    raise EipRestService.CreateFmt('Incompatible types of methods %s and %s', [AGetMethod.Name, ASetMethod.Name]);
+  FIsDateTime := TRttiUtils.IsDateTime(AGetMethod.ReturnType.Handle);
+  FKind := AGetMethod.ReturnType.TypeKind;
+  FName := AGetMethod.Name.Substring(3).ToLower;
+  FGetMethod := AGetMethod.Handle;
+  FIndex := AIndex;
+  FSetMethod := ASetMethod.Handle;
+  TValue.Make(nil, AGetMethod.ReturnType.Handle, FDefaultValue);
+end;
+
+function TApiProperty.GetValue(const AProperties: TArray<TValue>): TValue;
+begin
+  Result := AProperties[FIndex];
+end;
+
 initialization
   GRestService := TRestServiceManager.Create;
+  GRestService.RegisterConverters([TipJsonEnumConverter, TipJsonSetConverter]);
 finalization
   FreeAndNil(GRestService);
 end.
