@@ -808,21 +808,37 @@ constructor TApiMethod.Create(const AQualifiedName: string;
   const ATypeHeaders: TNameValueArray; const ARttiParameters: TArray<TRttiParameter>;
   const ARttiReturnType: TRttiType; const AAttributes: TArray<TCustomAttribute>);
 
-  function IsBodyParam(const AName: string; const AAttributtes: TArray<TCustomAttribute>; out ABodyContentKind: TBodyContentKind): Boolean;
+  function IsBodyParam(const ARttiParameter: TRttiParameter; out ABodyContentKind: TBodyContentKind): Boolean;
   var
     LBodyAttribute: BodyAttribute;
+    LName: string;
   begin
-    Result := (AName = 'abody') or
-      (AName = 'body') or
-      (AName = 'bodycontent') or
-      (AName = 'abodycontent') or
-      (AName = 'content') or
-      (AName = 'acontent');
+    LName := ARttiParameter.Name.ToLower;
+
+    Result := (LName = 'abody') or
+      (LName = 'body') or
+      (LName = 'bodycontent') or
+      (LName = 'abodycontent') or
+      (LName = 'content') or
+      (LName = 'acontent');
+
     if not Result then
     begin
-      Result := TRttiUtils.HasAttribute<BodyAttribute>(AAttributtes, LBodyAttribute);
+      Result := TRttiUtils.HasAttribute<BodyAttribute>(ARttiParameter.GetAttributes, LBodyAttribute);
       if Result then
         ABodyContentKind := LBodyAttribute.BodyType;
+    end
+    else
+    begin
+      // you can declare the body of type TMultipartFormData with out the attribute
+      if ARttiParameter.ParamType.Handle.Name = 'TMultipartFormData' then
+      begin
+        ABodyContentKind := TBodyContentKind.MultipartFormData;
+      end
+      else
+      begin
+        ABodyContentKind := TBodyContentKind.Default;
+      end;
     end;
   end;
 
@@ -914,7 +930,7 @@ begin
     end
     else
     begin
-      if IsBodyParam(ARttiParameters[I].Name.ToLower, ARttiParameters[I].GetAttributes, FBodyContentKind) then
+      if IsBodyParam(ARttiParameters[I], FBodyContentKind) then
       begin
         if FBodyArgIndex <> -1 then
           raise EipRestService.CreateFmt('Found two content body argument in method %s', [FQualifiedName]);
