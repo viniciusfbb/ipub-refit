@@ -7,7 +7,10 @@ interface
 uses
   { Delphi }
   System.SysUtils,
+  System.Rtti,
+  System.TypInfo,
   System.JSON.Serializers,
+  System.Generics.Collections,
   System.NetEncoding,
   System.Net.HttpClientComponent;
 
@@ -32,8 +35,16 @@ type
     property Url: string read FUrl;
   end;
 
+  TBodyContentKind = (Default, MultipartFormData);
+
   // Parameter attribute
-  BodyAttribute = class(TCustomAttribute);
+  BodyAttribute = class(TCustomAttribute)
+  strict private
+    FBodyType: TBodyContentKind;
+  public
+    constructor Create(const ABodyType: TBodyContentKind = TBodyContentKind.Default);
+    property BodyType: TBodyContentKind read FBodyType;
+  end;
 
   // Parameter attribute
   HeaderAttribute = class(TCustomAttribute)
@@ -52,6 +63,7 @@ type
   TraceAttribute = class(TipUrlAttribute);
   HeadAttribute = class(TipUrlAttribute);
   PutAttribute = class(TipUrlAttribute);
+  PatchAttribute = class(TipUrlAttribute);
 
   // Method and type attribute
   HeadersAttribute = class(HeaderAttribute)
@@ -68,6 +80,22 @@ type
   // The rest api interface must be descendent of IipRestApi or inside the {$M+} directive
   {$M+}IipRestApi = interface end;{$M-}
 
+  // We want to keep the unit compact
+  // so any consumer could use only this unit for registring converters
+  TJsonConverter = System.JSON.Serializers.TJsonConverter;
+
+  { IApiJsonSerializer }
+
+  // This is meant to be used to set a custom serializer
+  TApiJsonSerializer = class
+  public
+    function Deserialize(const AJson: string; const ATypeInfo: PTypeInfo): TValue; virtual; abstract;
+    function Serialize(const AValue: TValue): string; virtual; abstract;
+    function GetConverters: TList<TJsonConverter>; virtual; abstract;
+    function SupportsConvertorsRegistration: Boolean; virtual; abstract;
+    property Converters: TList<TJsonConverter> read GetConverters;
+  end;
+
   { TipRestService }
 
   // This class and the rest api interfaces created by this class are thread safe.
@@ -78,6 +106,7 @@ type
   protected
     type
       TJsonConverterClass = class of TJsonConverter;
+      TApiJsonSerializerClass = class of TApiJsonSerializer;
   protected
     procedure MakeFor(const ATypeInfo: Pointer; const AClient: TNetHTTPClient; const ABaseUrl: string; const AThreadSafe: Boolean; out AResult); virtual; abstract;
   public
@@ -86,6 +115,7 @@ type
     // You can pass your own client, but you will be responsible for giving the client free after use the rest api interface returned
     function &For<T: IInterface>(const AClient: TNetHTTPClient; const ABaseUrl: string = ''; AThreadSafe: Boolean = True): T; overload;
     procedure RegisterConverters(const AConverterClasses: TArray<TJsonConverterClass>); virtual; abstract;
+    procedure SetJsonSerializer(const AApiJsonSerializerClass: TApiJsonSerializerClass); virtual; abstract;
   end;
 
 var
@@ -97,18 +127,17 @@ uses
   { Delphi }
   System.Classes,
   System.Character,
-  System.Rtti,
-  System.TypInfo,
-  System.Generics.Collections,
   System.SyncObjs,
   System.JSON.Types,
   System.JSON.Writers,
   System.JSON.Readers,
   System.Net.HttpClient,
-  System.Net.URLClient;
+  System.Net.Mime,
+  System.Net.URLClient,
+  idGlobal;
 
 type
-  TMethodKind = (Get, Post, Delete, Options, Trace, Head, Put);
+  TMethodKind = (Get, Post, Delete, Options, Trace, Head, Put, Patch);
 
   { TRttiUtils }
 
@@ -120,12 +149,24 @@ type
     class function IsDateTime(const ATypeInfo: PTypeInfo): Boolean; static;
   end;
 
-  { TApiJsonSerializer }
+  { TDefaultApiJsonSerializer }
 
-  TApiJsonSerializer = class(TJsonSerializer)
+  TDefaultApiJsonSerializer = class(TApiJsonSerializer)
+  private
+    type
+      TSJsonSerializer = class(System.JSON.Serializers.TJsonSerializer) end; // To expose protected methods? The S is just to diff the name
+  strict private
+    FJsonSerializer: TSJsonSerializer;
+    function GetSerializer: TSJsonSerializer;
+    property JsonSerializer: TSJsonSerializer read GetSerializer;
   public
-    function Deserialize(const AJson: string; const ATypeInfo: PTypeInfo): TValue; overload;
-    function Serialize(const AValue: TValue): string; overload;
+    destructor Destroy; override;
+    function GetConverters: TList<TJsonConverter>; override;
+    function Deserialize(const AJson: string; const ATypeInfo: PTypeInfo): TValue; override;
+    function Serialize(const AValue: TValue): string; override;
+    function SupportsConvertorsRegistration: Boolean; override;
+
+    property Converters:  TList<TJsonConverter> read GetConverters;
   end;
 
   { TipJsonEnumConverter }
@@ -195,6 +236,7 @@ type
     FBodyArgIndex: Integer;
     FBodyIsDateTime: Boolean;
     FBodyKind: TTypeKind;
+    FBodyContentKind: TBodyContentKind;
     FKind: TMethodKind;
     FHeaderParameters: TArray<TApiParam>;
     FHeaders: TNameValueArray;
@@ -265,7 +307,7 @@ type
     FProperties: TArray<TValue>;
     procedure CallMethod(const AMethodHandle: Pointer; const AArgs: TArray<TValue>; var AResult: TValue);
   public
-    constructor Create(const AApiType: IApiType; const AConverters: TArray<TJsonConverter>; const AClient: TNetHTTPClient; const ABaseUrl: string; const AThreadSafe: Boolean);
+    constructor Create(const AApiType: IApiType; const AConverters: TArray<TJsonConverter>; const AClient: TNetHTTPClient; const AJsonSerializerClass: TipRestService.TApiJsonSerializerClass; const ABaseUrl: string; const AThreadSafe: Boolean);
     destructor Destroy; override;
   end;
 
@@ -275,6 +317,7 @@ type
   strict private
     FApiTypeMap: TDictionary<PTypeInfo, IApiType>;
     FConvertersList: TObjectList<TJsonConverter>;
+    FApiJsonSerializerClass: TipRestService.TApiJsonSerializerClass;
     {$IF CompilerVersion >= 34.0}
     FLock: TLightweightMREW;
     {$ELSE}
@@ -284,15 +327,14 @@ type
   protected
     procedure MakeFor(const ATypeInfo: Pointer; const AClient: TNetHTTPClient; const ABaseUrl: string; const AThreadSafe: Boolean; out AResult); override;
   public
-    {$IF CompilerVersion < 34.0}
     constructor Create;
-    {$ENDIF}
     destructor Destroy; override;
     procedure RegisterConverters(const AConverterClasses: TArray<TipRestService.TJsonConverterClass>); override;
+    procedure SetJsonSerializer(const AApiJsonSerializerClass: TipRestService.TApiJsonSerializerClass); override;
   end;
 
 const
-  CMethodsWithBodyContent: set of TMethodKind = [TMethodKind.Post, TMethodKind.Put];
+  CMethodsWithBodyContent: set of TMethodKind = [TMethodKind.Post, TMethodKind.Put, TMethodKind.Patch];
   CMethodsWithoutResponseContent: set of TMethodKind = [TMethodKind.Head];
   CSupportedResultKind: set of TTypeKind = [TTypeKind.tkUString, TTypeKind.tkClass, TTypeKind.tkMRecord, TTypeKind.tkRecord, TTypeKind.tkDynArray];
 
@@ -328,6 +370,14 @@ constructor HeadersAttribute.Create(const AName, AValue: string);
 begin
   inherited Create(AName);
   FValue := AValue;
+end;
+
+{ BodyAttribute }
+
+constructor BodyAttribute.Create(const ABodyType: TBodyContentKind);
+begin
+  inherited Create;
+  FBodyType := ABodyType;
 end;
 
 { TipRestService }
@@ -400,9 +450,32 @@ begin
     (ATypeInfo = System.TypeInfo(TDateTime)) or (ATypeInfo = System.TypeInfo(TTime));
 end;
 
-{ TApiJsonSerializer }
+{ TDefaultApiJsonSerializer }
 
-function TApiJsonSerializer.Deserialize(const AJson: string;
+destructor TDefaultApiJsonSerializer.Destroy;
+begin
+  if Assigned(FJsonSerializer) then
+    FJsonSerializer.Free;
+  inherited;
+end;
+
+function TDefaultApiJsonSerializer.GetConverters: TList<TJsonConverter>;
+begin
+  Result := JsonSerializer.Converters;
+end;
+
+function TDefaultApiJsonSerializer.GetSerializer: TSJsonSerializer;
+begin
+  // It will require the use of Rtti to call the right constructor
+  // https://stackoverflow.com/questions/791069/how-can-i-create-an-delphi-object-from-a-class-reference-and-ensure-constructor
+  // So I would rather do it like this, because it will be needed for this serializer
+  // see TApiVirtualInterface.Create() for where it is supposed to call the right constructor
+  if not Assigned(FJsonSerializer) then
+    FJsonSerializer := TSJsonSerializer.Create;
+  Result := FJsonSerializer;
+end;
+
+function TDefaultApiJsonSerializer.Deserialize(const AJson: string;
   const ATypeInfo: PTypeInfo): TValue;
 var
   LStringReader: TStringReader;
@@ -411,11 +484,11 @@ begin
   LStringReader := TStringReader.Create(AJson);
   try
     LJsonReader := TJsonTextReader.Create(LStringReader);
-    LJsonReader.DateTimeZoneHandling := DateTimeZoneHandling;
-    LJsonReader.DateParseHandling := DateParseHandling;
-    LJsonReader.MaxDepth := MaxDepth;
+    LJsonReader.DateTimeZoneHandling := JsonSerializer.DateTimeZoneHandling;
+    LJsonReader.DateParseHandling := JsonSerializer.DateParseHandling;
+    LJsonReader.MaxDepth := JsonSerializer.MaxDepth;
     try
-      Result := InternalDeserialize(LJsonReader, ATypeInfo);
+      Result := JsonSerializer.InternalDeserialize(LJsonReader, ATypeInfo);
     finally
       LJsonReader.Free;
     end;
@@ -424,7 +497,7 @@ begin
   end;
 end;
 
-function TApiJsonSerializer.Serialize(const AValue: TValue): string;
+function TDefaultApiJsonSerializer.Serialize(const AValue: TValue): string;
 var
   LStringBuilder: TStringBuilder;
   LStringWriter: TStringWriter;
@@ -434,13 +507,13 @@ begin
   LStringWriter := TStringWriter.Create(LStringBuilder);
   try
     LJsonWriter := TJsonTextWriter.Create(LStringWriter);
-    LJsonWriter.FloatFormatHandling := FloatFormatHandling;
-    LJsonWriter.DateFormatHandling := DateFormatHandling;
-    LJsonWriter.DateTimeZoneHandling := DateTimeZoneHandling;
-    LJsonWriter.StringEscapeHandling := StringEscapeHandling;
-    LJsonWriter.Formatting := Formatting;
+    LJsonWriter.FloatFormatHandling := JsonSerializer.FloatFormatHandling;
+    LJsonWriter.DateFormatHandling := JsonSerializer.DateFormatHandling;
+    LJsonWriter.DateTimeZoneHandling := JsonSerializer.DateTimeZoneHandling;
+    LJsonWriter.StringEscapeHandling := JsonSerializer.StringEscapeHandling;
+    LJsonWriter.Formatting := JsonSerializer.Formatting;
     try
-      InternalSerialize(LJsonWriter, AValue);
+      JsonSerializer.InternalSerialize(LJsonWriter, AValue);
     finally
       LJsonWriter.Free;
     end;
@@ -449,6 +522,11 @@ begin
     LStringWriter.Free;
     LStringBuilder.Free;
   end;
+end;
+
+function TDefaultApiJsonSerializer.SupportsConvertorsRegistration: Boolean;
+begin
+  Result := True;
 end;
 
 { TipJsonEnumConverter }
@@ -567,10 +645,13 @@ var
   LArgumentAsString: string;
   LResponse: IHTTPResponse;
   LResponseContent: TBytesStream;
-  LBodyContent: TStringList;
+  LBodyContent: TMemoryStream;
   LResponseString: string;
   LHeaders: TNameValueArray;
   LStr: string;
+  LHasABody: Boolean;
+  LContentHeaderSet: Boolean;
+  LMultipartFormData: TMultipartFormData;
 begin
   LHeaders := Copy(FHeaders);
   SetLength(LHeaders, Length(LHeaders) + Length(FHeaderParameters));
@@ -618,23 +699,64 @@ begin
       LRelativeUrl := LRelativeUrl.Replace('{' + AProperties[I].Name + '}', TNetEncoding.URL.EncodeForm(LArgumentAsString), [rfReplaceAll, rfIgnoreCase]);
     end;
   end;
-  if FKind in CMethodsWithBodyContent then
-    LBodyContent := TStringList.Create
-  else
-    LBodyContent := nil;
+
+  LBodyContent := nil;
+  LHasABody := FKind in CMethodsWithBodyContent;
+
   try
-    if Assigned(LBodyContent) then
+    if LHasABody then
     begin
-      if FBodyArgIndex > -1 then
-      begin
-        if FBodyKind in [TTypeKind.tkClass, TTypeKind.tkInterface, TTypeKind.tkMRecord, TTypeKind.tkRecord] then
-          LBodyContent.Text := AJsonSerializer.Serialize(AArgs[FBodyArgIndex])
-        else
-          LBodyContent.Text := GetStringValue(AArgs[FBodyArgIndex], FBodyKind, FBodyIsDateTime);
-      end
+      LBodyContent := TMemoryStream.Create;
+
+      case FBodyContentKind of
+        TBodyContentKind.Default:
+        begin
+          if FBodyArgIndex > -1 then
+          begin
+            if FBodyKind in [TTypeKind.tkClass, TTypeKind.tkInterface, TTypeKind.tkMRecord, TTypeKind.tkRecord] then
+              WriteStringToStream(LBodyContent, AJsonSerializer.Serialize(AArgs[FBodyArgIndex]), IndyTextEncoding_UTF8)
+            else
+              WriteStringToStream(LBodyContent, GetStringValue(AArgs[FBodyArgIndex], FBodyKind, FBodyIsDateTime), IndyTextEncoding_UTF8);
+          end
+          else
+            LBodyContent.Clear;
+        end;
+        TBodyContentKind.MultipartFormData:
+        begin
+          if AArgs[FBodyArgIndex].IsInstanceOf(TMultipartFormData) then
+          begin
+            LMultipartFormData := TMultipartFormData(AArgs[FBodyArgIndex].AsObject);
+            LMultipartFormData.Stream.Position := 0;
+            // You can optimize by using the LMultipartFormData.Stream directly but you need to handle the flow of freeing LBodyContent
+            LBodyContent.CopyFrom(LMultipartFormData.Stream, LMultipartFormData.Stream.Size);
+
+            // make sure content type is valid
+            LContentHeaderSet := False;
+            for I := Low(LHeaders) to High(LHeaders) do
+            begin
+              if LHeaders[I].Name = 'Content-Type' then
+              begin
+                LHeaders[I].Value := LMultipartFormData.MimeTypeHeader;
+                LContentHeaderSet := True;
+                Break;
+              end;
+            end;
+
+            if not LContentHeaderSet then
+            begin
+              LHeaders := LHeaders + [TNameValuePair.Create('Content-Type', LMultipartFormData.MimeTypeHeader)];
+            end;
+          end
+          else
+            raise EipRestService.Create('Body content kind set to "TBodyContentKind.MultipartFormData" but content is not of "TMultipartFormData"');
+        end;
       else
-        LBodyContent.Text := '';
+        raise EipRestService.Create('Unkown body content kind!!');
+      end;
+
+      LBodyContent.Position := 0;
     end;
+
     LRelativeUrl := ABaseUrl + LRelativeUrl;
 
     if FKind in CMethodsWithoutResponseContent then
@@ -644,12 +766,13 @@ begin
     try
       case FKind of
         TMethodKind.Get: LResponse := AClient.Get(LRelativeUrl, LResponseContent, LHeaders);
-        TMethodKind.Post: LResponse := AClient.Post(LRelativeUrl, LBodyContent, LResponseContent, nil, LHeaders);
+        TMethodKind.Post: LResponse := AClient.Post(LRelativeUrl, LBodyContent, LResponseContent, LHeaders);
         TMethodKind.Delete: LResponse := AClient.Delete(LRelativeUrl, LResponseContent, LHeaders);
         TMethodKind.Options: LResponse := AClient.Options(LRelativeUrl, LResponseContent, LHeaders);
         TMethodKind.Trace: LResponse := AClient.Trace(LRelativeUrl, LResponseContent, LHeaders);
         TMethodKind.Head: LResponse := AClient.Head(LRelativeUrl, LHeaders);
-        TMethodKind.Put: LResponse := AClient.Put(LRelativeUrl, LBodyContent, LResponseContent, nil, LHeaders);
+        TMethodKind.Put: LResponse := AClient.Put(LRelativeUrl, LBodyContent, LResponseContent, LHeaders);
+        TMethodKind.Patch: LResponse := AClient.Patch(LRelativeUrl, LBodyContent, LResponseContent, LHeaders);
       else
         Assert(False);
       end;
@@ -685,16 +808,38 @@ constructor TApiMethod.Create(const AQualifiedName: string;
   const ATypeHeaders: TNameValueArray; const ARttiParameters: TArray<TRttiParameter>;
   const ARttiReturnType: TRttiType; const AAttributes: TArray<TCustomAttribute>);
 
-  function IsBodyParam(const AName: string; const AAttributtes: TArray<TCustomAttribute>): Boolean;
+  function IsBodyParam(const ARttiParameter: TRttiParameter; out ABodyContentKind: TBodyContentKind): Boolean;
+  var
+    LBodyAttribute: BodyAttribute;
+    LName: string;
   begin
-    Result := (AName = 'abody') or
-      (AName = 'body') or
-      (AName = 'bodycontent') or
-      (AName = 'abodycontent') or
-      (AName = 'content') or
-      (AName = 'acontent');
+    LName := ARttiParameter.Name.ToLower;
+
+    Result := (LName = 'abody') or
+      (LName = 'body') or
+      (LName = 'bodycontent') or
+      (LName = 'abodycontent') or
+      (LName = 'content') or
+      (LName = 'acontent');
+
     if not Result then
-      Result := TRttiUtils.HasAttribute<BodyAttribute>(AAttributtes);
+    begin
+      Result := TRttiUtils.HasAttribute<BodyAttribute>(ARttiParameter.GetAttributes, LBodyAttribute);
+      if Result then
+        ABodyContentKind := LBodyAttribute.BodyType;
+    end
+    else
+    begin
+      // you can declare the body of type TMultipartFormData with out the attribute
+      if ARttiParameter.ParamType.Handle.Name = 'TMultipartFormData' then
+      begin
+        ABodyContentKind := TBodyContentKind.MultipartFormData;
+      end
+      else
+      begin
+        ABodyContentKind := TBodyContentKind.Default;
+      end;
+    end;
   end;
 
   function FixName(const AName: string; var ARelativeUrl: string): string;
@@ -749,6 +894,8 @@ begin
         FKind := TMethodKind.Head
       else if AAttributes[I] is PutAttribute then
         FKind := TMethodKind.Put
+      else if AAttributes[I] is PatchAttribute then
+        FKind := TMethodKind.Patch
       else
         Continue;
       FRelativeUrl := TipUrlAttribute(AAttributes[I]).Url.Trim;
@@ -783,7 +930,7 @@ begin
     end
     else
     begin
-      if IsBodyParam(ARttiParameters[I].Name.ToLower, ARttiParameters[I].GetAttributes) then
+      if IsBodyParam(ARttiParameters[I], FBodyContentKind) then
       begin
         if FBodyArgIndex <> -1 then
           raise EipRestService.CreateFmt('Found two content body argument in method %s', [FQualifiedName]);
@@ -951,6 +1098,7 @@ end;
 
 constructor TApiVirtualInterface.Create(const AApiType: IApiType;
   const AConverters: TArray<TJsonConverter>; const AClient: TNetHTTPClient;
+  const AJsonSerializerClass: TipRestService.TApiJsonSerializerClass;
   const ABaseUrl: string; const AThreadSafe: Boolean);
 var
   I: Integer;
@@ -970,8 +1118,10 @@ begin
     FBaseUrl := FBaseUrl.Substring(0, Length(FBaseUrl)-1).TrimRight;
   if FBaseUrl.IsEmpty then
     raise EipRestService.Create('Invalid base url. The base url can be set as an argument or declaring the attribute [BaseUrl(?)] above the apiinterface service');
-  FJsonSerializer := TApiJsonSerializer.Create;
-  if Length(AConverters) > 0 then
+
+  FJsonSerializer := AJsonSerializerClass.Create;
+
+  if (Length(AConverters) > 0) and FJsonSerializer.SupportsConvertorsRegistration then
     FJsonSerializer.Converters.InsertRange(0, AConverters);
   if Assigned(AClient) then
     FClient := AClient
@@ -997,13 +1147,16 @@ end;
 
 { TRestServiceManager }
 
-{$IF CompilerVersion < 34.0}
 constructor TRestServiceManager.Create;
 begin
   inherited Create;
+  {$IF CompilerVersion < 34.0}
   FLock := TCriticalSection.Create;
+  {$ENDIF}
+  FConvertersList := nil;
+  FApiTypeMap := nil;
+  FApiJsonSerializerClass := TDefaultApiJsonSerializer;
 end;
-{$ENDIF}
 
 function TRestServiceManager.CreateApiType(
   const ATypeInfo: PTypeInfo): IApiType;
@@ -1184,7 +1337,7 @@ begin
     end;
   end;
 
-  LInterface := TApiVirtualInterface.Create(LApiType, LConverters, AClient, ABaseUrl, AThreadSafe);
+  LInterface := TApiVirtualInterface.Create(LApiType, LConverters, AClient, FApiJsonSerializerClass, ABaseUrl, AThreadSafe);
   if not Supports(LInterface, LApiType.IID, AResult) then
     raise EipRestService.Create('Unexpected error creating the service');
 end;
@@ -1211,6 +1364,11 @@ begin
     FLock.Leave;
     {$ENDIF}
   end;
+end;
+
+procedure TRestServiceManager.SetJsonSerializer(const AApiJsonSerializerClass: TipRestService.TApiJsonSerializerClass);
+begin
+  FApiJsonSerializerClass := AApiJsonSerializerClass;
 end;
 
 { TApiProperty }
