@@ -51,7 +51,7 @@ The GRestService instance generates an implementation of IGitHubApi that interna
   [Post('/users/{AUser}?message={AMessage}')]
   function GetUserJson(const AUser, AMessage: string): string;
   ```
-  All standard methods are supported (Get, Post, Delete, Options, Trace, Head, Put).
+  All standard methods are supported (Get, Post, Delete, Put and Patch).
   
   The relative url can have masks {argument_name/property_name}, in anywhere and can repeat, to mark where an argument or property can be inserted. More details in the next topic.
 
@@ -148,23 +148,25 @@ The GRestService instance generates an implementation of IGitHubApi that interna
   ```
   
   #### Authentication
-  If the api need some kind of authentication, you can implement it before create the rest api interface, using the TNetHTTPClient, and creating the rest api interface passing it as argument:
+  When you need some kind of authenticator like OAuth1 or OAuth2, you can use the native components of delphi like TOAuth2Authenticator. In this case you will need to create and configure this authenticator by your self and set it in property Authenticator of your rest api interface (it has been declared in parent interface, IipRestAPI)
   ```delphi
   var
-    LClient: TNetHTTPClient;
+    LOAuth2: TOAuth2Authenticator;
     LGithubApi: IGithubApi;
   begin
-    LClient := TNetHTTPClient.Create(nil);
+    LOAuth2 := TOAuth2Authenticator.Create(nil);
     try
-      // Do the authentication steps
+      // Configure the LOAuth2
       ...
-      LGithubApi := GRestService.&For<IGithubApi>(LClient);
+      LGithubApi := GRestService.&For<IGithubApi>;
+	  LGithubApi.Authenticator := LOAuth2;
       Showmessage(LGithubApi.GetUserJson('viniciusfbb'));
     finally
-      LClient.Free;
+      LOAuth2.Free;
     end;
   end;
   ```
+  Note: you need to destroy the authenticator by your self after use it, the rest service will not do it internally.
   
   #### Functional example
   ```delphi

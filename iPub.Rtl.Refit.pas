@@ -12,11 +12,12 @@ uses
   System.JSON.Serializers,
   System.Generics.Collections,
   System.NetEncoding,
-  System.Net.HttpClientComponent;
+  REST.Client;
 
 type
   // Exceptions
   EipRestService = class(Exception);
+  EipRestServiceCanceled = class(EipRestService);
   EipRestServiceStatusCode = class(EipRestService)
   strict private
     FStatusCode: Integer;
@@ -59,9 +60,6 @@ type
   GetAttribute = class(TipUrlAttribute);
   PostAttribute = class(TipUrlAttribute);
   DeleteAttribute = class(TipUrlAttribute);
-  OptionsAttribute = class(TipUrlAttribute);
-  TraceAttribute = class(TipUrlAttribute);
-  HeadAttribute = class(TipUrlAttribute);
   PutAttribute = class(TipUrlAttribute);
   PatchAttribute = class(TipUrlAttribute);
 
@@ -78,7 +76,23 @@ type
   BaseUrlAttribute = class(TipUrlAttribute);
 
   // The rest api interface must be descendent of IipRestApi or inside the {$M+} directive
-  {$M+}IipRestApi = interface end;{$M-}
+  {$M+}
+  IipRestApi = interface
+    // You can cancel the current request (for example when you need to close the program), but will raise an
+    // exception EipRestServiceCanceled
+    procedure CancelRequest;
+    function GetAuthenticator: TCustomAuthenticator;
+    function GetResponse: TRESTResponse;
+    procedure SetAuthenticator(AValue: TCustomAuthenticator);
+    // Set this authenticator is necessary when the api need a OAuth1 or OAuth2 for example, then you can use
+    // the native components like TOAuth2Authenticator. Then you will need to create and configure the
+    // authenticator by your self, set here and after finished all api calls you will need to destroy the authenticator
+    // (this rest service will not destroy it)
+    property Authenticator: TCustomAuthenticator read GetAuthenticator write SetAuthenticator;
+    // The response will be useful when you need to use a TRESTResponseDataSetAdapter
+    property Response: TRESTResponse read GetResponse;
+  end;
+  {$M-}
 
   { TipRestService }
 
@@ -102,12 +116,12 @@ type
       TJsonConverterClass = class of TJsonConverter;
       TApiJsonSerializerClass = class of TApiJsonSerializer;
   protected
-    procedure MakeFor(const ATypeInfo: Pointer; const AClient: TNetHTTPClient; const ABaseUrl: string; const AThreadSafe: Boolean; const AJsonSerializerClass: TApiJsonSerializerClass; out AResult); virtual; abstract;
+    procedure MakeFor(const ATypeInfo: Pointer; const AClient: TRESTClient; const ABaseUrl: string; const AThreadSafe: Boolean; const AJsonSerializerClass: TApiJsonSerializerClass; out AResult); virtual; abstract;
   public
     function &For<T: IInterface>: T; overload;
     function &For<T: IInterface>(const ABaseUrl: string): T; overload;
     // You can pass your own client, but you will be responsible for giving the client free after use the rest api interface returned
-    function &For<T: IInterface>(const AClient: TNetHTTPClient; const ABaseUrl: string = ''; const AThreadSafe: Boolean = True; const AJsonSerializerClass: TApiJsonSerializerClass = nil): T; overload;
+    function &For<T: IInterface>(const AClient: TRESTClient; const ABaseUrl: string = ''; const AThreadSafe: Boolean = True; const AJsonSerializerClass: TApiJsonSerializerClass = nil): T; overload;
     procedure RegisterConverters(const AConverterClasses: TArray<TJsonConverterClass>); virtual; abstract;
   end;
 
@@ -124,13 +138,12 @@ uses
   System.JSON.Types,
   System.JSON.Writers,
   System.JSON.Readers,
-  System.Net.HttpClient,
   System.Net.Mime,
   System.Net.URLClient,
-  idGlobal;
+  REST.Types;
 
 type
-  TMethodKind = (Get, Post, Delete, Options, Trace, Head, Put, Patch);
+  TMethodKind = (Get, Post, Delete, Put, Patch);
 
   { TRttiUtils }
 
@@ -245,26 +258,33 @@ type
   public
     constructor Create(const AQualifiedName: string; const ATypeHeaders: TNameValueArray; const ARttiParameters: TArray<TRttiParameter>; const ARttiReturnType: TRttiType; const AAttributes: TArray<TCustomAttribute>);
     destructor Destroy; override;
-    procedure CallApi(const AClient: TNetHTTPClient; const ABaseUrl: string;
+    procedure CallApi(const ABaseUrl: string;
       const AJsonSerializer: TipRestService.TApiJsonSerializer; const AArgs: TArray<TValue>;
       var AResult: TValue; const AProperties: TObjectList<TApiProperty>;
-      const APropertiesValues: TArray<TValue>);
+      const APropertiesValues: TArray<TValue>; const ACancelRequest: PBoolean;
+      const ARequest: TRESTRequest);
   end;
 
   { IApiType }
 
   IApiType = interface
+    function GetAuthenticatorPropertyIndex: Integer;
     function GetBaseUrl: string;
+    function GetCancelRequestMethod: Pointer;
     function GetIID: TGUID;
     function GetMethods: TObjectDictionary<Pointer, TApiMethod>;
     function GetProperties: TObjectList<TApiProperty>;
     function GetPropertiesMethods: TDictionary<Pointer, TApiProperty>;
+    function GetResponseGetterMethod: Pointer;
     function GetTypeInfo: PTypeInfo;
+    property AuthenticatorPropertyIndex: Integer read GetAuthenticatorPropertyIndex;
     property BaseUrl: string read GetBaseUrl;
+    property CancelRequestMethod: Pointer read GetCancelRequestMethod;
     property IID: TGUID read GetIID;
     property Methods: TObjectDictionary<Pointer, TApiMethod> read GetMethods;
     property Properties: TObjectList<TApiProperty> read GetProperties;
     property PropertiesMethods: TDictionary<Pointer, TApiProperty> read GetPropertiesMethods;
+    property ResponseGetterMethod: Pointer read GetResponseGetterMethod;
     property TypeInfo: PTypeInfo read GetTypeInfo;
   end;
 
@@ -272,21 +292,30 @@ type
 
   TApiType = class(TInterfacedObject, IApiType)
   strict private
+    FAuthenticatorPropertyIndex: Integer;
     FBaseUrl: string;
+    FCancelRequestMethod: Pointer;
     FIID: TGUID;
     FMethods: TObjectDictionary<Pointer, TApiMethod>;
     FProperties: TObjectList<TApiProperty>;
     FPropertiesMethods: TDictionary<Pointer, TApiProperty>;
+    FResponseGetterMethod: Pointer;
     FTypeInfo: PTypeInfo;
+    function GetAuthenticatorPropertyIndex: Integer;
     function GetBaseUrl: string;
+    function GetCancelRequestMethod: Pointer;
     function GetIID: TGUID;
     function GetMethods: TObjectDictionary<Pointer, TApiMethod>;
     function GetProperties: TObjectList<TApiProperty>;
     function GetPropertiesMethods: TDictionary<Pointer, TApiProperty>;
+    function GetResponseGetterMethod: Pointer;
     function GetTypeInfo: PTypeInfo;
   public
-    constructor Create(const ABaseUrl: string; const AIID: TGUID; const AMethods: TObjectDictionary<Pointer, TApiMethod>;
-      const AProperties: TObjectList<TApiProperty>; const APropertiesMethods: TDictionary<Pointer, TApiProperty>; const ATypeInfo: PTypeInfo);
+    constructor Create(const AAuthenticatorPropertyIndex: Integer; const ABaseUrl: string;
+      const ACancelRequestMethod: Pointer; const AIID: TGUID;
+      const AMethods: TObjectDictionary<Pointer, TApiMethod>; const AProperties: TObjectList<TApiProperty>;
+      const APropertiesMethods: TDictionary<Pointer, TApiProperty>; const AResponseGetterMethod: Pointer;
+      const ATypeInfo: PTypeInfo);
     destructor Destroy; override;
   end;
 
@@ -296,14 +325,19 @@ type
   strict private
     FApiType: IApiType;
     FBaseUrl: string;
-    FClient: TNetHTTPClient;
+    FCancelNextRequest: Boolean;
+    FClient: TRESTClient;
     FClientOwn: Boolean;
     FJsonSerializer: TipRestService.TApiJsonSerializer;
     FLocker: TCriticalSection;
     FProperties: TArray<TValue>;
+    FRequest: TRESTRequest;
+    FResponse: TRESTResponse;
     procedure CallMethod(const AMethodHandle: Pointer; const AArgs: TArray<TValue>; var AResult: TValue);
+    procedure CancelRequest;
+    function GetAuthenticator: TCustomAuthenticator;
   public
-    constructor Create(const AApiType: IApiType; const AConverters: TArray<TJsonConverter>; const AClient: TNetHTTPClient; const AJsonSerializerClass: TipRestService.TApiJsonSerializerClass; const ABaseUrl: string; const AThreadSafe: Boolean);
+    constructor Create(const AApiType: IApiType; const AConverters: TArray<TJsonConverter>; const AClient: TRESTClient; const AJsonSerializerClass: TipRestService.TApiJsonSerializerClass; const ABaseUrl: string; const AThreadSafe: Boolean);
     destructor Destroy; override;
   end;
 
@@ -320,7 +354,7 @@ type
     {$ENDIF}
     function CreateApiType(const ATypeInfo: PTypeInfo): IApiType;
   protected
-    procedure MakeFor(const ATypeInfo: Pointer; const AClient: TNetHTTPClient; const ABaseUrl: string;
+    procedure MakeFor(const ATypeInfo: Pointer; const AClient: TRESTClient; const ABaseUrl: string;
       const AThreadSafe: Boolean; const AJsonSerializerClass: TipRestService.TApiJsonSerializerClass; out AResult); override;
   public
     {$IF CompilerVersion < 34.0}
@@ -332,7 +366,7 @@ type
 
 const
   CMethodsWithBodyContent: set of TMethodKind = [TMethodKind.Post, TMethodKind.Put, TMethodKind.Patch];
-  CMethodsWithoutResponseContent: set of TMethodKind = [TMethodKind.Head];
+  CMethodsWithoutResponseContent: set of TMethodKind = [];
   CSupportedResultKind: set of TTypeKind = [TTypeKind.tkUString, TTypeKind.tkClass, TTypeKind.tkMRecord, TTypeKind.tkRecord, TTypeKind.tkDynArray];
 
 { EipRestServiceStatusCode }
@@ -396,7 +430,7 @@ begin
   MakeFor(TypeInfo(T), nil, ABaseUrl, True, nil, Result);
 end;
 
-function TipRestService.&For<T>(const AClient: TNetHTTPClient;
+function TipRestService.&For<T>(const AClient: TRESTClient;
   const ABaseUrl: string; const AThreadSafe: Boolean;
   const AJsonSerializerClass: TipRestService.TApiJsonSerializerClass): T;
 begin
@@ -631,10 +665,10 @@ end;
 
 { TApiMethod }
 
-procedure TApiMethod.CallApi(const AClient: TNetHTTPClient; const ABaseUrl: string;
+procedure TApiMethod.CallApi(const ABaseUrl: string;
   const AJsonSerializer: TipRestService.TApiJsonSerializer; const AArgs: TArray<TValue>;
   var AResult: TValue; const AProperties: TObjectList<TApiProperty>;
-  const APropertiesValues: TArray<TValue>);
+  const APropertiesValues: TArray<TValue>; const ACancelRequest: PBoolean; const ARequest: TRESTRequest);
 
   function GetStringValue(const AValue: TValue; const ATypeKind: TTypeKind; const AIsDateTime: Boolean): string; inline;
   begin
@@ -656,9 +690,8 @@ var
   J: Integer;
   LRelativeUrl: string;
   LArgumentAsString: string;
-  LResponse: IHTTPResponse;
-  LResponseContent: TBytesStream;
   LBodyContent: TMemoryStream;
+  LBodyBytes: TBytes;
   LResponseString: string;
   LHeaders: TNameValueArray;
   LStr: string;
@@ -711,6 +744,7 @@ begin
       LRelativeUrl := LRelativeUrl.Replace('{' + AProperties[I].Name + '}', TNetEncoding.URL.EncodeForm(LArgumentAsString), [rfReplaceAll, rfIgnoreCase]);
     end;
   end;
+  LBodyContent := nil;
   try
     if FKind in CMethodsWithBodyContent then
     begin
@@ -720,9 +754,11 @@ begin
           if FBodyArgIndex > -1 then
           begin
             if FBodyKind in [TTypeKind.tkClass, TTypeKind.tkInterface, TTypeKind.tkMRecord, TTypeKind.tkRecord] then
-              WriteStringToStream(LBodyContent, AJsonSerializer.Serialize(AArgs[FBodyArgIndex]), IndyTextEncoding_UTF8)
+              LBodyBytes := TEncoding.UTF8.GetBytes(AJsonSerializer.Serialize(AArgs[FBodyArgIndex]))
             else
-              WriteStringToStream(LBodyContent, GetStringValue(AArgs[FBodyArgIndex], FBodyKind, FBodyIsDateTime), IndyTextEncoding_UTF8);
+              LBodyBytes := TEncoding.UTF8.GetBytes(GetStringValue(AArgs[FBodyArgIndex], FBodyKind, FBodyIsDateTime));
+            if Length(LBodyBytes) > 0 then
+              LBodyContent.WriteBuffer(LBodyBytes, Length(LBodyBytes));
           end;
         TBodyContentKind.MultipartFormData:
           begin
@@ -753,49 +789,44 @@ begin
         Assert(False);
       end;
       LBodyContent.Position := 0;
-    end
-    else
-      LBodyContent := nil;
+    end;
     LRelativeUrl := ABaseUrl + LRelativeUrl;
 
-    if FKind in CMethodsWithoutResponseContent then
-      LResponseContent := nil
+    case FKind of
+      TMethodKind.Get: ARequest.Method := TRESTRequestMethod.rmGET;
+      TMethodKind.Post: ARequest.Method := TRESTRequestMethod.rmPOST;
+      TMethodKind.Delete: ARequest.Method := TRESTRequestMethod.rmDELETE;
+      TMethodKind.Put: ARequest.Method := TRESTRequestMethod.rmPUT;
+      TMethodKind.Patch: ARequest.Method := TRESTRequestMethod.rmPATCH;
     else
-      LResponseContent := TBytesStream.Create;
-    try
-      case FKind of
-        TMethodKind.Get: LResponse := AClient.Get(LRelativeUrl, LResponseContent, LHeaders);
-        TMethodKind.Post: LResponse := AClient.Post(LRelativeUrl, LBodyContent, LResponseContent, LHeaders);
-        TMethodKind.Delete: LResponse := AClient.Delete(LRelativeUrl, LResponseContent, LHeaders);
-        TMethodKind.Options: LResponse := AClient.Options(LRelativeUrl, LResponseContent, LHeaders);
-        TMethodKind.Trace: LResponse := AClient.Trace(LRelativeUrl, LResponseContent, LHeaders);
-        TMethodKind.Head: LResponse := AClient.Head(LRelativeUrl, LHeaders);
-        TMethodKind.Put: LResponse := AClient.Put(LRelativeUrl, LBodyContent, LResponseContent, LHeaders);
-        TMethodKind.Patch: LResponse := AClient.Patch(LRelativeUrl, LBodyContent, LResponseContent, LHeaders);
+      Assert(False);
+    end;
+    ARequest.Client.BaseURL := LRelativeUrl;
+    ARequest.Params.Clear;
+    ARequest.ClearBody;
+    if Assigned(LBodyContent) then
+      ARequest.AddBody(LBodyContent);
+    for I := 0 to Length(LHeaders)-1 do
+      ARequest.Params.AddHeader(LHeaders[I].Name, LHeaders[I].Value);
+    if ACancelRequest^ then
+      raise EipRestServiceCanceled.Create('Request canceled');
+    ARequest.Execute;
+    if ARequest.IsCancelled then
+      raise EipRestServiceCanceled.Create('Request canceled');
+    if (ARequest.Response.StatusCode < 200) or (ARequest.Response.StatusCode > 299) then
+      raise EipRestServiceStatusCode.Create(ARequest.Response.StatusCode, ARequest.Response.StatusText, FQualifiedName);
+    if (not (FKind in CMethodsWithoutResponseContent)) and (FResultKind <> TTypeKind.tkUnknown) then
+    begin
+      LResponseString := ARequest.Response.Content;
+      case FResultKind of
+        TTypeKind.tkUString: AResult := LResponseString;
+        TTypeKind.tkDynArray,
+        TTypeKind.tkClass,
+        TTypeKind.tkMRecord,
+        TTypeKind.tkRecord: AResult := AJsonSerializer.Deserialize(LResponseString, FResultTypeInfo);
       else
         Assert(False);
       end;
-      if (LResponse.StatusCode < 200) or (LResponse.StatusCode > 299) then
-        raise EipRestServiceStatusCode.Create(LResponse.StatusCode, LResponse.StatusText, FQualifiedName);
-      if Assigned(LResponseContent) and (FResultKind <> TTypeKind.tkUnknown) then
-      begin
-        if LResponse.ContentCharSet.ToLower <> 'utf-8' then
-          raise EipRestService.CreateFmt('Unsupported charset %s received from %s method', [LResponse.ContentCharSet, FQualifiedName]);
-        LResponseString := TEncoding.UTF8.GetString(LResponseContent.Bytes, 0, LResponseContent.Size);
-
-        case FResultKind of
-          TTypeKind.tkUString: AResult := LResponseString;
-          TTypeKind.tkDynArray,
-          TTypeKind.tkClass,
-          TTypeKind.tkMRecord,
-          TTypeKind.tkRecord: AResult := AJsonSerializer.Deserialize(LResponseString, FResultTypeInfo);
-        else
-          Assert(False);
-        end;
-      end;
-    finally
-      if Assigned(LResponseContent) then
-        LResponseContent.Free;
     end;
   finally
     if Assigned(LBodyContent) then
@@ -878,12 +909,6 @@ begin
         FKind := TMethodKind.Post
       else if AAttributes[I] is DeleteAttribute then
         FKind := TMethodKind.Delete
-      else if AAttributes[I] is OptionsAttribute then
-        FKind := TMethodKind.Options
-      else if AAttributes[I] is TraceAttribute then
-        FKind := TMethodKind.Trace
-      else if AAttributes[I] is HeadAttribute then
-        FKind := TMethodKind.Head
       else if AAttributes[I] is PutAttribute then
         FKind := TMethodKind.Put
       else if AAttributes[I] is PatchAttribute then
@@ -975,17 +1000,22 @@ end;
 
 { TApiType }
 
-constructor TApiType.Create(const ABaseUrl: string; const AIID: TGUID;
+constructor TApiType.Create(const AAuthenticatorPropertyIndex: Integer;
+  const ABaseUrl: string; const ACancelRequestMethod: Pointer; const AIID: TGUID;
   const AMethods: TObjectDictionary<Pointer, TApiMethod>;
   const AProperties: TObjectList<TApiProperty>;
-  const APropertiesMethods: TDictionary<Pointer, TApiProperty>; const ATypeInfo: PTypeInfo);
+  const APropertiesMethods: TDictionary<Pointer, TApiProperty>;
+  const AResponseGetterMethod: Pointer; const ATypeInfo: PTypeInfo);
 begin
   inherited Create;
+  FAuthenticatorPropertyIndex := AAuthenticatorPropertyIndex;
   FBaseUrl := ABaseUrl;
+  FCancelRequestMethod := ACancelRequestMethod;
   FIID := AIID;
   FMethods := AMethods;
   FProperties := AProperties;
   FPropertiesMethods := APropertiesMethods;
+  FResponseGetterMethod := AResponseGetterMethod;
   FTypeInfo := ATypeInfo;
 end;
 
@@ -997,9 +1027,19 @@ begin
   inherited;
 end;
 
+function TApiType.GetAuthenticatorPropertyIndex: Integer;
+begin
+  Result := FAuthenticatorPropertyIndex;
+end;
+
 function TApiType.GetBaseUrl: string;
 begin
   Result := FBaseUrl;
+end;
+
+function TApiType.GetCancelRequestMethod: Pointer;
+begin
+  Result := FCancelRequestMethod;
 end;
 
 function TApiType.GetIID: TGUID;
@@ -1022,6 +1062,11 @@ begin
   Result := FPropertiesMethods;
 end;
 
+function TApiType.GetResponseGetterMethod: Pointer;
+begin
+  Result := FResponseGetterMethod;
+end;
+
 function TApiType.GetTypeInfo: PTypeInfo;
 begin
   Result := FTypeInfo;
@@ -1034,10 +1079,11 @@ procedure TApiVirtualInterface.CallMethod(const AMethodHandle: Pointer;
 var
   LAccept: string;
   LAcceptCharSet: string;
+  LAuthenticator: TCustomAuthenticator;
   LConnectionTimeout: Integer;
   LHandleRedirects: Boolean;
+  LSyncEvents: Boolean;
   LResponseTimeout: Integer;
-  LAsync: Boolean;
   LMethod: TApiMethod;
   LProperty: TApiProperty;
 begin
@@ -1048,25 +1094,37 @@ begin
     try
       LAccept := FClient.Accept;
       LAcceptCharSet := FClient.AcceptCharSet;
-      LConnectionTimeout := FClient.ConnectionTimeout;
+      LAuthenticator := FClient.Authenticator;
+      LConnectionTimeout := FClient.ConnectTimeout;
       LHandleRedirects := FClient.HandleRedirects;
-      LResponseTimeout := FClient.ResponseTimeout;
-      LAsync := FClient.Asynchronous;
+      LResponseTimeout := FClient.ReadTimeout;
+      LSyncEvents := FClient.SynchronizedEvents;
       FClient.Accept := 'application/json';
-      FClient.AcceptCharSet := 'UTF-8';
-      FClient.ConnectionTimeout := 10000;
+      FClient.AcceptCharSet := 'utf-8';
+      FClient.Authenticator := GetAuthenticator;
+      FClient.ConnectTimeout := 10000;
       FClient.HandleRedirects := False;
-      FClient.ResponseTimeout := 10000;
-      FClient.Asynchronous := False;
+      FClient.ReadTimeout := 10000;
+      FClient.SynchronizedEvents := False;
+      FRequest.Client := FClient;
       try
-        LMethod.CallApi(FClient, FBaseUrl, FJsonSerializer, AArgs, AResult, FApiType.Properties, FProperties);
+        try
+          LMethod.CallApi(FBaseUrl, FJsonSerializer, AArgs, AResult, FApiType.Properties, FProperties, @FCancelNextRequest, FRequest);
+        except
+          on E: EipRestServiceCanceled do
+          begin
+            FCancelNextRequest := False;
+            raise;
+          end;
+        end;
       finally
-        FClient.Asynchronous := LAsync;
         FClient.Accept := LAccept;
         FClient.AcceptCharSet := LAcceptCharSet;
-        FClient.ConnectionTimeout := LConnectionTimeout;
+        FClient.Authenticator := LAuthenticator;
+        FClient.ConnectTimeout := LConnectionTimeout;
         FClient.HandleRedirects := LHandleRedirects;
-        FClient.ResponseTimeout := LResponseTimeout;
+        FClient.ReadTimeout := LResponseTimeout;
+        FClient.SynchronizedEvents := LSyncEvents;
       end;
     finally
       if Assigned(FLocker) then
@@ -1084,12 +1142,22 @@ begin
         FLocker.Leave;
     end;
   end
+  else if FApiType.CancelRequestMethod = AMethodHandle then
+    CancelRequest
+  else if FApiType.ResponseGetterMethod = AMethodHandle then
+    AResult := FResponse
   else
     raise EipRestService.Create('Unexpected error calling the api');
 end;
 
+procedure TApiVirtualInterface.CancelRequest;
+begin
+  FCancelNextRequest := True;
+  FRequest.Cancel;
+end;
+
 constructor TApiVirtualInterface.Create(const AApiType: IApiType;
-  const AConverters: TArray<TJsonConverter>; const AClient: TNetHTTPClient;
+  const AConverters: TArray<TJsonConverter>; const AClient: TRESTClient;
   const AJsonSerializerClass: TipRestService.TApiJsonSerializerClass;
   const ABaseUrl: string; const AThreadSafe: Boolean);
 var
@@ -1120,22 +1188,35 @@ begin
     FClient := AClient
   else
   begin
-    FClient := TNetHTTPClient.Create(nil);
+    FClient := TRESTClient.Create(nil);
     FClientOwn := True;
   end;
   SetLength(FProperties, FApiType.Properties.Count);
   for I := 0 to Length(FProperties)-1 do
     FProperties[I] := FApiType.Properties[I].DefaultValue;
+  FResponse := TRESTResponse.Create(nil);
+  FRequest := TRESTRequest.Create(nil);
+  FRequest.Response := FResponse;
 end;
 
 destructor TApiVirtualInterface.Destroy;
 begin
+  FRequest.Free;
+  FResponse.Free;
   if Assigned(FLocker) then
     FLocker.Free;
   if FClientOwn then
     FClient.Free;
   FJsonSerializer.Free;
   inherited;
+end;
+
+function TApiVirtualInterface.GetAuthenticator: TCustomAuthenticator;
+begin
+  if (FApiType.AuthenticatorPropertyIndex >= 0) and (FProperties[FApiType.AuthenticatorPropertyIndex].AsObject is TCustomAuthenticator) then
+    Result := TCustomAuthenticator(FProperties[FApiType.AuthenticatorPropertyIndex].AsObject)
+  else
+    Result := nil;
 end;
 
 { TRestServiceManager }
@@ -1151,7 +1232,9 @@ end;
 function TRestServiceManager.CreateApiType(
   const ATypeInfo: PTypeInfo): IApiType;
 var
+  LAuthenticatorPropertyIndex: Integer;
   LBaseUrlAttr: BaseUrlAttribute;
+  LCancelRequestMethod: Pointer;
   LContext: TRttiContext;
   LRttiType: TRttiType;
   LRttiMethods: TArray<TRttiMethod>;
@@ -1163,11 +1246,14 @@ var
   LHeadersAttributes: TArray<HeadersAttribute>;
   LProperties: TObjectList<TApiProperty>;
   LPropertiesMethods: TDictionary<Pointer, TApiProperty>;
+  LResponseGetterMethod: Pointer;
   LFound: Boolean;
   LIID: TGUID;
   LBaseUrl: string;
   I: Integer;
 begin
+  LCancelRequestMethod := nil;
+  LResponseGetterMethod := nil;
   LMethods := TObjectDictionary<Pointer, TApiMethod>.Create([doOwnsValues]);
   LProperties := TObjectList<TApiProperty>.Create(True);
   LPropertiesMethods := TDictionary<Pointer, TApiProperty>.Create;
@@ -1193,6 +1279,17 @@ begin
       LRttiMethods := LRttiType.GetMethods;
       for LRttiMethod in LRttiMethods do
       begin
+        if (LRttiMethod.Name.ToLower = 'cancelrequest') and (Length(LRttiMethod.GetParameters) = 0) and not Assigned(LCancelRequestMethod) then
+        begin
+          LCancelRequestMethod := LRttiMethod.Handle;
+          Continue;
+        end;
+        if (LRttiMethod.Name.ToLower = 'getresponse') and (Length(LRttiMethod.GetParameters) = 0) and (LRttiMethod.ReturnType <> nil) and
+          (LRttiMethod.ReturnType.Handle = TRESTResponse.ClassInfo) and not Assigned(LResponseGetterMethod) then
+        begin
+          LResponseGetterMethod := LRttiMethod.Handle;
+          Continue;
+        end;
         if LMethods.ContainsKey(LRttiMethod.Handle) then
           raise EipRestService.Create('Unexpected error adding two duplicated methods');
         LAttributes := LRttiMethod.GetAttributes;
@@ -1256,7 +1353,17 @@ begin
     raise EipRestService.Create('The interface type don''t have methods or {$M+} directive or is not descendent from IipRestApi');
   if LIID = TGUID.Empty then
     raise EipRestService.Create('The interface type must have one GUID');
-  Result := TApiType.Create(LBaseUrl, LIID, LMethods, LProperties, LPropertiesMethods, ATypeInfo);
+  LAuthenticatorPropertyIndex := -1;
+  for I := 0 to LProperties.Count-1 do
+  begin
+    if (LProperties[I].Name.ToLower = 'authenticator') and (LProperties[I].Kind = TTypeKind.tkClass) then
+    begin
+      LAuthenticatorPropertyIndex := I;
+      Break;
+    end;
+  end;
+  Result := TApiType.Create(LAuthenticatorPropertyIndex, LBaseUrl, LCancelRequestMethod,
+    LIID, LMethods, LProperties, LPropertiesMethods, LResponseGetterMethod, ATypeInfo);
 end;
 
 destructor TRestServiceManager.Destroy;
@@ -1272,7 +1379,7 @@ begin
 end;
 
 procedure TRestServiceManager.MakeFor(const ATypeInfo: Pointer;
-  const AClient: TNetHTTPClient; const ABaseUrl: string; const AThreadSafe: Boolean;
+  const AClient: TRESTClient; const ABaseUrl: string; const AThreadSafe: Boolean;
   const AJsonSerializerClass: TipRestService.TApiJsonSerializerClass; out AResult);
 var
   LInterface: IInterface;
