@@ -811,8 +811,13 @@ begin
     if ACancelRequest^ then
       raise EipRestServiceCanceled.Create('Request canceled');
     ARequest.Execute;
+    {$IF CompilerVersion >= 34} // Delphi 10.4 Sydney
     if ARequest.IsCancelled then
       raise EipRestServiceCanceled.Create('Request canceled');
+    {$ELSE}
+    if ACancelRequest^ then
+      raise EipRestServiceCanceled.Create('Request canceled');
+    {$ENDIF}
     if (ARequest.Response.StatusCode < 200) or (ARequest.Response.StatusCode > 299) then
       raise EipRestServiceStatusCode.Create(ARequest.Response.StatusCode, ARequest.Response.StatusText, FQualifiedName);
     if (not (FKind in CMethodsWithoutResponseContent)) and (FResultKind <> TTypeKind.tkUnknown) then
@@ -1082,8 +1087,10 @@ var
   LAuthenticator: TCustomAuthenticator;
   LConnectionTimeout: Integer;
   LHandleRedirects: Boolean;
+  {$IF CompilerVersion >= 34} // Delphi 10.4 Sydney
+  LReadTimeout: Integer;
+  {$ENDIF}
   LSyncEvents: Boolean;
-  LResponseTimeout: Integer;
   LMethod: TApiMethod;
   LProperty: TApiProperty;
 begin
@@ -1095,16 +1102,24 @@ begin
       LAccept := FClient.Accept;
       LAcceptCharSet := FClient.AcceptCharSet;
       LAuthenticator := FClient.Authenticator;
+      {$IF CompilerVersion >= 34} // Delphi 10.4 Sydney
       LConnectionTimeout := FClient.ConnectTimeout;
+      LReadTimeout := FClient.ReadTimeout;
+      {$ELSE}
+      LConnectionTimeout := FClient.Timeout;
+      {$ENDIF}
       LHandleRedirects := FClient.HandleRedirects;
-      LResponseTimeout := FClient.ReadTimeout;
       LSyncEvents := FClient.SynchronizedEvents;
       FClient.Accept := 'application/json';
       FClient.AcceptCharSet := 'utf-8';
       FClient.Authenticator := GetAuthenticator;
+      {$IF CompilerVersion >= 34} // Delphi 10.4 Sydney
       FClient.ConnectTimeout := 10000;
-      FClient.HandleRedirects := False;
       FClient.ReadTimeout := 10000;
+      {$ELSE}
+      FClient.Timeout := 10000;
+      {$ENDIF}
+      FClient.HandleRedirects := False;
       FClient.SynchronizedEvents := False;
       FRequest.Client := FClient;
       try
@@ -1121,9 +1136,13 @@ begin
         FClient.Accept := LAccept;
         FClient.AcceptCharSet := LAcceptCharSet;
         FClient.Authenticator := LAuthenticator;
-        FClient.ConnectTimeout := LConnectionTimeout;
         FClient.HandleRedirects := LHandleRedirects;
-        FClient.ReadTimeout := LResponseTimeout;
+        {$IF CompilerVersion >= 34} // Delphi 10.4 Sydney
+        FClient.ConnectTimeout := LConnectionTimeout;
+        FClient.ReadTimeout := LReadTimeout;
+        {$ELSE}
+        FClient.Timeout := LConnectionTimeout;
+        {$ENDIF}
         FClient.SynchronizedEvents := LSyncEvents;
       end;
     finally
@@ -1153,7 +1172,9 @@ end;
 procedure TApiVirtualInterface.CancelRequest;
 begin
   FCancelNextRequest := True;
+  {$IF CompilerVersion >= 34} // Delphi 10.4 Sydney
   FRequest.Cancel;
+  {$ENDIF}
 end;
 
 constructor TApiVirtualInterface.Create(const AApiType: IApiType;
