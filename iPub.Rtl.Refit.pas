@@ -18,6 +18,7 @@ type
   // Exceptions
   EipRestService = class(Exception);
   EipRestServiceCanceled = class(EipRestService);
+  EipRestServiceFailed = class(EipRestService);
   EipRestServiceStatusCode = class(EipRestService)
   strict private
     FStatusCode: Integer;
@@ -160,6 +161,12 @@ type
   TDefaultApiJsonSerializer = class(TipRestService.TApiJsonSerializer)
   private
     type
+      TJsonContractResolver = class(TJsonDefaultContractResolver)
+      protected
+        procedure SetPropertySettingsFromAttributes(const AProperty: TJsonProperty; const ARttiMember: TRttiMember;
+          AMemberSerialization: TJsonMemberSerialization); override;
+      end;
+
       TSystemJsonSerializer = class(TJsonSerializer)
       public
         function Deserialize(const AJson: string; const ATypeInfo: PTypeInfo): TValue; overload;
@@ -255,8 +262,11 @@ type
     FResultKind: TTypeKind;
     FResultIsDateTime: Boolean;
     FResultTypeInfo: PTypeInfo;
+    FTryFunction: Boolean;
+    FTryFunctionResultParameterIndex: Integer;
   public
-    constructor Create(const AQualifiedName: string; const ATypeHeaders: TNameValueArray; const ARttiParameters: TArray<TRttiParameter>; const ARttiReturnType: TRttiType; const AAttributes: TArray<TCustomAttribute>);
+    constructor Create(const AQualifiedName: string; const ATypeHeaders: TNameValueArray;
+      const ARttiParameters: TArray<TRttiParameter>; const ARttiReturnType: TRttiType; const AAttributes: TArray<TCustomAttribute>);
     destructor Destroy; override;
     procedure CallApi(const ABaseUrl: string;
       const AJsonSerializer: TipRestService.TApiJsonSerializer; const AArgs: TArray<TValue>;
@@ -489,6 +499,28 @@ begin
     (ATypeInfo = System.TypeInfo(TDateTime)) or (ATypeInfo = System.TypeInfo(TTime));
 end;
 
+{ TDefaultApiJsonSerializer.TJsonContractResolver }
+
+procedure TDefaultApiJsonSerializer.TJsonContractResolver.SetPropertySettingsFromAttributes(
+  const AProperty: TJsonProperty; const ARttiMember: TRttiMember;
+  AMemberSerialization: TJsonMemberSerialization);
+begin
+  inherited;
+  if (not AProperty.Ignored) and (AProperty.AttributeProvider.GetAttribute(JsonNameAttribute) = nil) then
+  begin
+    if (ARttiMember is TRttiField) and
+      (Length(AProperty.Name) > 1) and
+      AProperty.Name.StartsWith('F', True) and
+      AProperty.Name.Chars[1].IsUpper then
+    begin
+      AProperty.Name := AProperty.Name.Substring(1);
+    end;
+    // Apply camel case
+    if Length(AProperty.Name) > 0 then
+      AProperty.Name := AProperty.Name.Chars[0].ToLower + AProperty.Name.Substring(1);
+  end;
+end;
+
 { TDefaultApiJsonSerializer.TSystemJsonSerializer }
 
 function TDefaultApiJsonSerializer.TSystemJsonSerializer.Deserialize(
@@ -547,6 +579,7 @@ constructor TDefaultApiJsonSerializer.Create;
 begin
   inherited;
   FJsonSerializer := TSystemJsonSerializer.Create;
+  FJsonSerializer.ContractResolver := TJsonContractResolver.Create;
 end;
 
 function TDefaultApiJsonSerializer.Deserialize(const AJson: string;
@@ -698,6 +731,8 @@ var
   LContentHeaderSet: Boolean;
   LMultipartFormData: TMultipartFormData;
 begin
+  if FTryFunction then
+    AResult := False;
   LHeaders := Copy(FHeaders);
   SetLength(LHeaders, Length(LHeaders) + Length(FHeaderParameters));
   for I := 0 to Length(FHeaderParameters)-1 do
@@ -809,30 +844,77 @@ begin
     for I := 0 to Length(LHeaders)-1 do
       ARequest.Params.AddHeader(LHeaders[I].Name, LHeaders[I].Value);
     if ACancelRequest^ then
-      raise EipRestServiceCanceled.Create('Request canceled');
-    ARequest.Execute;
+    begin
+      ACancelRequest^ := False;
+      if FTryFunction then
+        Exit
+      else
+        raise EipRestServiceCanceled.Create('Request canceled');
+    end;
+    try
+      ARequest.Execute;
+    except
+      on E: ERESTException do
+      begin
+        if FTryFunction then
+          Exit
+        else
+          Exception.RaiseOuterException(EipRestServiceFailed.Create('Service or connection failed'));
+      end;
+    end;
     {$IF CompilerVersion >= 34} // Delphi 10.4 Sydney
     if ARequest.IsCancelled then
-      raise EipRestServiceCanceled.Create('Request canceled');
+    begin
+      ACancelRequest^ := False;
+      if FTryFunction then
+        Exit
+      else
+        raise EipRestServiceCanceled.Create('Request canceled');
+    end;
     {$ELSE}
     if ACancelRequest^ then
-      raise EipRestServiceCanceled.Create('Request canceled');
+    begin
+      ACancelRequest^ := False;
+      if FTryFunction then
+        Exit
+      else
+        raise EipRestServiceCanceled.Create('Request canceled');
+    end;
     {$ENDIF}
     if (ARequest.Response.StatusCode < 200) or (ARequest.Response.StatusCode > 299) then
-      raise EipRestServiceStatusCode.Create(ARequest.Response.StatusCode, ARequest.Response.StatusText, FQualifiedName);
+    begin
+      if FTryFunction then
+        Exit
+      else
+        raise EipRestServiceStatusCode.Create(ARequest.Response.StatusCode, ARequest.Response.StatusText, FQualifiedName);
+    end;
     if (not (FKind in CMethodsWithoutResponseContent)) and (FResultKind <> TTypeKind.tkUnknown) then
     begin
       LResponseString := ARequest.Response.Content;
       case FResultKind of
-        TTypeKind.tkUString: AResult := LResponseString;
+        TTypeKind.tkUString:
+          begin
+            if FTryFunction then
+              AArgs[FTryFunctionResultParameterIndex] := LResponseString
+            else
+              AResult := LResponseString;
+          end;
         TTypeKind.tkDynArray,
         TTypeKind.tkClass,
         TTypeKind.tkMRecord,
-        TTypeKind.tkRecord: AResult := AJsonSerializer.Deserialize(LResponseString, FResultTypeInfo);
+        TTypeKind.tkRecord:
+          begin
+            if FTryFunction then
+              AArgs[FTryFunctionResultParameterIndex] := AJsonSerializer.Deserialize(LResponseString, FResultTypeInfo)
+            else
+              AResult := AJsonSerializer.Deserialize(LResponseString, FResultTypeInfo);
+          end;
       else
         Assert(False);
       end;
     end;
+    if FTryFunction then
+      AResult := True;
   finally
     if Assigned(LBodyContent) then
       LBodyContent.Free;
@@ -893,9 +975,12 @@ var
   LIsDateTime: Boolean;
   LHeadersAttributes: TArray<HeadersAttribute>;
   LHeaderAttribute: HeaderAttribute;
+  LRttiReturnType: TRttiType;
   I: Integer;
 begin
   inherited Create;
+  FTryFunction := False;
+  FTryFunctionResultParameterIndex := -1;
   FQualifiedName := AQualifiedName;
   LHeadersAttributes := TRttiUtils.Attributes<HeadersAttribute>(AAttributes);
   SetLength(FHeaders, Length(LHeadersAttributes));
@@ -933,6 +1018,45 @@ begin
     raise EipRestService.CreateFmt('Cannot possible to find one method kind in %s attributes. ' +
       'You can use for example [Get(''\users'')].', [FQualifiedName]);
 
+  if ARttiReturnType = nil then
+    FResultKind := TTypeKind.tkUnknown
+  else
+  begin
+    LRttiReturnType := ARttiReturnType;
+    FTryFunction := (LRttiReturnType.Handle = TypeInfo(Boolean)) and AQualifiedName.ToLower.Contains('.try');
+    if FTryFunction then
+    begin
+      for I := 0 to Length(ARttiParameters)-1 do
+      begin
+        if [TParamFlag.pfVar, TParamFlag.pfOut] * ARttiParameters[I].Flags <> [] then
+        begin
+          FTryFunctionResultParameterIndex := I + 1;
+          Break;
+        end;
+      end;
+      if FTryFunctionResultParameterIndex = -1 then
+        FResultKind := TTypeKind.tkUnknown
+      else
+        LRttiReturnType := ARttiParameters[FTryFunctionResultParameterIndex - 1].ParamType;
+    end;
+
+    if (not FTryFunction) or (FTryFunctionResultParameterIndex > -1) then
+    begin
+      if FKind in CMethodsWithoutResponseContent then
+        raise EipRestService.CreateFmt('The kind of method %s does not permit any result', [FQualifiedName]);
+      FResultKind := LRttiReturnType.TypeKind;
+      if not (FResultKind in CSupportedResultKind) then
+        raise EipRestService.CreateFmt('The result type in %s method is not allowed', [FQualifiedName]);
+      if (FResultKind = TTypeKind.tkDynArray) and ((not Assigned(TRttiDynamicArrayType(LRttiReturnType).ElementType)) or
+         not (TRttiDynamicArrayType(LRttiReturnType).ElementType.TypeKind in [TTypeKind.tkClass, TTypeKind.tkMRecord, TTypeKind.tkRecord])) then
+      begin
+        raise EipRestService.CreateFmt('The result type in %s method is not allowed', [FQualifiedName]);
+      end;
+      FResultTypeInfo := LRttiReturnType.Handle;
+      FResultIsDateTime := TRttiUtils.IsDateTime(LRttiReturnType.Handle);
+    end;
+  end;
+
   LParametersCount := 0;
   SetLength(FParameters, Length(ARttiParameters));
   FBodyArgIndex := -1;
@@ -940,6 +1064,10 @@ begin
 
   for I := 0 to Length(ARttiParameters)-1 do
   begin
+    if I = FTryFunctionResultParameterIndex - 1 then
+      Continue;
+    if [TParamFlag.pfVar, TParamFlag.pfOut] * ARttiParameters[I].Flags <> [] then
+      raise EipRestService.CreateFmt('Argument %s have a invalid flag (var or out) in method %s. This flags are accepted only in Try functions and only by one argument.', [ARttiParameters[I].Name, FQualifiedName]);
     if ARttiParameters[I].ParamType = nil then
       raise EipRestService.CreateFmt('Argument %s have a invalid type in method %s', [ARttiParameters[I].Name, FQualifiedName]);
     if TRttiUtils.HasAttribute<HeadersAttribute>(ARttiParameters[I].GetAttributes) then
@@ -972,24 +1100,6 @@ begin
 
   if Length(FParameters) <> LParametersCount then
     SetLength(FParameters, LParametersCount);
-
-  if ARttiReturnType = nil then
-    FResultKind := TTypeKind.tkUnknown
-  else
-  begin
-    if FKind in CMethodsWithoutResponseContent then
-      raise EipRestService.CreateFmt('The kind of method %s does not permit any result', [FQualifiedName]);
-    FResultKind := ARttiReturnType.TypeKind;
-    if not (FResultKind in CSupportedResultKind) then
-      raise EipRestService.CreateFmt('The result type in %s method is not allowed', [FQualifiedName]);
-    if (FResultKind = TTypeKind.tkDynArray) and ((not Assigned(TRttiDynamicArrayType(ARttiReturnType).ElementType)) or
-       not (TRttiDynamicArrayType(ARttiReturnType).ElementType.TypeKind in [TTypeKind.tkClass, TTypeKind.tkMRecord, TTypeKind.tkRecord])) then
-    begin
-      raise EipRestService.CreateFmt('The result type in %s method is not allowed', [FQualifiedName]);
-    end;
-    FResultTypeInfo := ARttiReturnType.Handle;
-    FResultIsDateTime := TRttiUtils.IsDateTime(ARttiReturnType.Handle);
-  end;
 end;
 
 destructor TApiMethod.Destroy;
@@ -1123,15 +1233,7 @@ begin
       FClient.SynchronizedEvents := False;
       FRequest.Client := FClient;
       try
-        try
-          LMethod.CallApi(FBaseUrl, FJsonSerializer, AArgs, AResult, FApiType.Properties, FProperties, @FCancelNextRequest, FRequest);
-        except
-          on E: EipRestServiceCanceled do
-          begin
-            FCancelNextRequest := False;
-            raise;
-          end;
-        end;
+        LMethod.CallApi(FBaseUrl, FJsonSerializer, AArgs, AResult, FApiType.Properties, FProperties, @FCancelNextRequest, FRequest);
       finally
         FClient.Accept := LAccept;
         FClient.AcceptCharSet := LAcceptCharSet;

@@ -402,6 +402,35 @@ The GRestService instance generates an implementation of IGitHubApi that interna
     // Now you will see that LUser.Name.IsNull = False but the LUser.Email.IsNull = True
   ```
 
+  #### Cancel requests
+  It is important to be able to cancel any request that is being made, especially before closing the program, because waiting for the total execution can take a few seconds and thus delaying the closing of the program. For that, we created the CancelRequest method in api base class (IipRestApi), then just call:
+  ```delphi
+    LGithubApi.CancelRequest;
+  ```
+  But this will raise an exception for the request in progress (EipRestServiceCanceled). More info in next topics.
+  
+  #### Handling exceptions
+  We have four exceptions that need to be considered when using the service
+  - EipRestService: general exception for declarations errors or internal errors
+  - EipRestServiceCanceled: exception generated when you call one method of the api and another thread call the CancelRequest (no problem here, you just need to consider this)
+  - EipRestServiceFailed = exception generated when rest service fails like connection fail or protocol errors
+  - EipRestServiceStatusCode = exception generated when received a status code different then 2xx;
+  
+  To "silence" the exceptions see the next topic.
+  
+  #### Try functions
+  To "silence" some exceptions you can declare "Try functions" in your rest api interface. Is very simple, just declare functions that starts with the "Try" name and return Boolean. If the method have a result you can also declare it in parameter with the "out" flag. See the same two methods declared with and without "Try function":
+  ```delphi
+    IGithubApi = interface(IipRestApi)
+      ['{4C3B546F-216D-46D9-8E7D-0009C0771064}']
+      [Get('/users/{user}')]
+      function GetUser(const AUser: string): TUser;
+      [Get('/users/{user}')]
+      function TryGetUser(const AUser: string; out AResult: TUser): Boolean;
+    end;
+  ```
+  Now, the TryGetUser will "silence" the exceptions EipRestServiceCanceled, EipRestServiceFailed and EipRestServiceStatusCode.
+  
   #### Considerations
   The GRestService and the rest api interfaces created by it are thread safe.
   
