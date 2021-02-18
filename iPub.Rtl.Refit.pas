@@ -728,7 +728,7 @@ var
   LResponseString: string;
   LHeaders: TNameValueArray;
   LStr: string;
-  LContentHeaderSet: Boolean;
+  LContentHeaderIndex: Integer;
   LMultipartFormData: TMultipartFormData;
 begin
   if FTryFunction then
@@ -747,12 +747,12 @@ begin
       if LStr.Contains('{' + FParameters[J].Name.ToLower + '}') then
       begin
         LArgumentAsString := GetStringValue(AArgs[FParameters[J].ArgIndex], FParameters[J].Kind, FParameters[J].IsDateTime);
-        LHeaders[I].Value := LHeaders[I].Value.Replace('{' + FParameters[J].Name + '}', TNetEncoding.URL.EncodeForm(LArgumentAsString), [rfReplaceAll, rfIgnoreCase]);
+        LHeaders[I].Value := LHeaders[I].Value.Replace('{' + FParameters[J].Name + '}', LArgumentAsString, [rfReplaceAll, rfIgnoreCase]);
       end;
       if LStr.Contains('{a' + FParameters[J].Name.ToLower + '}') then
       begin
         LArgumentAsString := GetStringValue(AArgs[FParameters[J].ArgIndex], FParameters[J].Kind, FParameters[J].IsDateTime);
-        LHeaders[I].Value := LHeaders[I].Value.Replace('{a' + FParameters[J].Name + '}', TNetEncoding.URL.EncodeForm(LArgumentAsString), [rfReplaceAll, rfIgnoreCase]);
+        LHeaders[I].Value := LHeaders[I].Value.Replace('{a' + FParameters[J].Name + '}', LArgumentAsString, [rfReplaceAll, rfIgnoreCase]);
       end;
     end;
     for J := 0 to AProperties.Count-1 do
@@ -760,8 +760,17 @@ begin
       if LStr.Contains('{' + AProperties[J].Name + '}') then
       begin
         LArgumentAsString := GetStringValue(AProperties[J].GetValue(APropertiesValues), AProperties[J].Kind, AProperties[J].IsDateTime);
-        LHeaders[I].Value := LHeaders[I].Value.Replace('{' + AProperties[J].Name + '}', TNetEncoding.URL.EncodeForm(LArgumentAsString), [rfReplaceAll, rfIgnoreCase]);
+        LHeaders[I].Value := LHeaders[I].Value.Replace('{' + AProperties[J].Name + '}', LArgumentAsString, [rfReplaceAll, rfIgnoreCase]);
       end;
+    end;
+  end;
+  LContentHeaderIndex := -1;
+  for I := Low(LHeaders) to High(LHeaders) do
+  begin
+    if LHeaders[I].Name.ToLower = 'content-type' then
+    begin
+      LContentHeaderIndex := I;
+      Break;
     end;
   end;
   LRelativeUrl := FRelativeUrl;
@@ -804,18 +813,13 @@ begin
               // You can optimize by using the LMultipartFormData.Stream directly but you need to handle the flow of freeing LBodyContent
               LBodyContent.CopyFrom(LMultipartFormData.Stream, LMultipartFormData.Stream.Size);
               // Make sure content type is valid
-              LContentHeaderSet := False;
-              for I := Low(LHeaders) to High(LHeaders) do
+              if LContentHeaderIndex > -1 then
+                LHeaders[LContentHeaderIndex].Value := LMultipartFormData.MimeTypeHeader
+              else
               begin
-                if LHeaders[I].Name = 'Content-Type' then
-                begin
-                  LHeaders[I].Value := LMultipartFormData.MimeTypeHeader;
-                  LContentHeaderSet := True;
-                  Break;
-                end;
-              end;
-              if not LContentHeaderSet then
                 LHeaders := LHeaders + [TNameValuePair.Create('Content-Type', LMultipartFormData.MimeTypeHeader)];
+                LContentHeaderIndex := Length(LHeaders) - 1;
+              end;
             end
             else
               raise EipRestService.Create('Body content kind set to "TBodyContentKind.MultipartFormData" but content is not of "TMultipartFormData"');
@@ -824,6 +828,12 @@ begin
         Assert(False);
       end;
       LBodyContent.Position := 0;
+      // Set the default content type
+      if LContentHeaderIndex = -1 then
+      begin
+        LHeaders := LHeaders + [TNameValuePair.Create('Content-Type', CONTENTTYPE_APPLICATION_JSON)];
+        LContentHeaderIndex := Length(LHeaders) - 1;
+      end;
     end;
     LRelativeUrl := ABaseUrl + LRelativeUrl;
 
@@ -842,7 +852,14 @@ begin
     if Assigned(LBodyContent) then
       ARequest.AddBody(LBodyContent);
     for I := 0 to Length(LHeaders)-1 do
-      ARequest.Params.AddHeader(LHeaders[I].Name, LHeaders[I].Value);
+    begin
+      if LHeaders[I].Name.ToLower = 'content-type' then
+        ARequest.Params.AddItem(LHeaders[I].Name, LHeaders[I].Value, TRESTRequestParameterKind.pkHTTPHEADER,
+          [TRESTRequestParameterOption.poDoNotEncode], ContentTypeFromString(LHeaders[I].Value))
+      else
+        ARequest.Params.AddItem(LHeaders[I].Name, LHeaders[I].Value, TRESTRequestParameterKind.pkHTTPHEADER,
+          [TRESTRequestParameterOption.poDoNotEncode]);
+    end;
     if ACancelRequest^ then
     begin
       ACancelRequest^ := False;
