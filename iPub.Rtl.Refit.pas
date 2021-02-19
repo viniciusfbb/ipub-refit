@@ -19,6 +19,7 @@ type
   EipRestService = class(Exception);
   EipRestServiceCanceled = class(EipRestService);
   EipRestServiceFailed = class(EipRestService);
+  EipRestServiceJson = class(EipRestService);
   EipRestServiceStatusCode = class(EipRestService)
   strict private
     FStatusCode: Integer;
@@ -65,11 +66,13 @@ type
   PatchAttribute = class(TipUrlAttribute);
 
   // Method and type attribute
-  HeadersAttribute = class(HeaderAttribute)
+  HeadersAttribute = class(TCustomAttribute)
   strict private
+    FName: string;
     FValue: string;
   public
     constructor Create(const AName, AValue: string);
+    property Name: string read FName;
     property Value: string read FValue;
   end;
 
@@ -185,24 +188,50 @@ type
     property Converters: TList<TJsonConverter> read GetConverters;
   end;
 
-  { TipJsonEnumConverter }
+  { TJsonConverters }
 
-  TipJsonEnumConverter = class(TJsonConverter)
+  TJsonConverters = record
   public
-    function CanConvert(ATypeInf: PTypeInfo): Boolean; override;
-    function ReadJson(const AReader: TJsonReader; ATypeInf: PTypeInfo; const AExistingValue: TValue;
-      const ASerializer: TJsonSerializer): TValue; override;
-    procedure WriteJson(const AWriter: TJsonWriter; const AValue: TValue; const ASerializer: TJsonSerializer); override;
-  end;
+    type
+      TEnumConverter = class(TJsonConverter)
+      public
+        function CanConvert(ATypeInf: PTypeInfo): Boolean; override;
+        function ReadJson(const AReader: TJsonReader; ATypeInf: PTypeInfo; const AExistingValue: TValue;
+          const ASerializer: TJsonSerializer): TValue; override;
+        procedure WriteJson(const AWriter: TJsonWriter; const AValue: TValue; const ASerializer: TJsonSerializer); override;
+      end;
 
-  { TipJsonSetConverter }
+      TSetConverter = class(TJsonConverter)
+      public
+        function CanConvert(ATypeInf: PTypeInfo): Boolean; override;
+        function ReadJson(const AReader: TJsonReader; ATypeInf: PTypeInfo; const AExistingValue: TValue;
+          const ASerializer: TJsonSerializer): TValue; override;
+        procedure WriteJson(const AWriter: TJsonWriter; const AValue: TValue; const ASerializer: TJsonSerializer); override;
+      end;
 
-  TipJsonSetConverter = class(TJsonConverter)
-  public
-    function CanConvert(ATypeInf: PTypeInfo): Boolean; override;
-    function ReadJson(const AReader: TJsonReader; ATypeInf: PTypeInfo; const AExistingValue: TValue;
-      const ASerializer: TJsonSerializer): TValue; override;
-    procedure WriteJson(const AWriter: TJsonWriter; const AValue: TValue; const ASerializer: TJsonSerializer); override;
+      TBooleanConverter = class(TJsonConverter)
+      public
+        function CanConvert(ATypeInf: PTypeInfo): Boolean; override;
+        function ReadJson(const AReader: TJsonReader; ATypeInf: PTypeInfo; const AExistingValue: TValue;
+          const ASerializer: TJsonSerializer): TValue; override;
+        procedure WriteJson(const AWriter: TJsonWriter; const AValue: TValue; const ASerializer: TJsonSerializer); override;
+      end;
+
+      TInt64Converter = class(TJsonConverter)
+      public
+        function CanConvert(ATypeInf: PTypeInfo): Boolean; override;
+        function ReadJson(const AReader: TJsonReader; ATypeInf: PTypeInfo; const AExistingValue: TValue;
+          const ASerializer: TJsonSerializer): TValue; override;
+        procedure WriteJson(const AWriter: TJsonWriter; const AValue: TValue; const ASerializer: TJsonSerializer); override;
+      end;
+
+      TUInt64Converter = class(TJsonConverter)
+      public
+        function CanConvert(ATypeInf: PTypeInfo): Boolean; override;
+        function ReadJson(const AReader: TJsonReader; ATypeInf: PTypeInfo; const AExistingValue: TValue;
+          const ASerializer: TJsonSerializer): TValue; override;
+        procedure WriteJson(const AWriter: TJsonWriter; const AValue: TValue; const ASerializer: TJsonSerializer); override;
+      end;
   end;
 
   { TApiParam }
@@ -417,7 +446,8 @@ end;
 
 constructor HeadersAttribute.Create(const AName, AValue: string);
 begin
-  inherited Create(AName);
+  inherited Create;
+  FName := AName;
   FValue := AValue;
 end;
 
@@ -609,14 +639,14 @@ begin
   Result := True;
 end;
 
-{ TipJsonEnumConverter }
+{ TJsonConverters.TEnumConverter }
 
-function TipJsonEnumConverter.CanConvert(ATypeInf: PTypeInfo): Boolean;
+function TJsonConverters.TEnumConverter.CanConvert(ATypeInf: PTypeInfo): Boolean;
 begin
   Result := (ATypeInf.Kind = TTypeKind.tkEnumeration) and (ATypeInf <> TypeInfo(Boolean)) and (ATypeInf.TypeData <> nil);
 end;
 
-function TipJsonEnumConverter.ReadJson(const AReader: TJsonReader;
+function TJsonConverters.TEnumConverter.ReadJson(const AReader: TJsonReader;
   ATypeInf: PTypeInfo; const AExistingValue: TValue;
   const ASerializer: TJsonSerializer): TValue;
 begin
@@ -625,7 +655,7 @@ begin
     Result := TValue.FromOrdinal(ATypeInf, GetEnumValue(ATypeInf, Result.AsString));
 end;
 
-procedure TipJsonEnumConverter.WriteJson(const AWriter: TJsonWriter;
+procedure TJsonConverters.TEnumConverter.WriteJson(const AWriter: TJsonWriter;
   const AValue: TValue; const ASerializer: TJsonSerializer);
 begin
   if (AValue.AsOrdinal < AValue.TypeData.MinValue) or (AValue.AsOrdinal > AValue.TypeData.MaxValue) then
@@ -634,14 +664,14 @@ begin
     AWriter.WriteValue(GetEnumName(AValue.TypeInfo, AValue.AsOrdinal));
 end;
 
-{ TipJsonSetConverter }
+{ TJsonConverters.TSetConverter }
 
-function TipJsonSetConverter.CanConvert(ATypeInf: PTypeInfo): Boolean;
+function TJsonConverters.TSetConverter.CanConvert(ATypeInf: PTypeInfo): Boolean;
 begin
   Result := (ATypeInf.Kind = TTypeKind.tkSet);
 end;
 
-function TipJsonSetConverter.ReadJson(const AReader: TJsonReader;
+function TJsonConverters.TSetConverter.ReadJson(const AReader: TJsonReader;
   ATypeInf: PTypeInfo; const AExistingValue: TValue;
   const ASerializer: TJsonSerializer): TValue;
 var
@@ -671,7 +701,7 @@ begin
     Result := AReader.Value;
 end;
 
-procedure TipJsonSetConverter.WriteJson(const AWriter: TJsonWriter;
+procedure TJsonConverters.TSetConverter.WriteJson(const AWriter: TJsonWriter;
   const AValue: TValue; const ASerializer: TJsonSerializer);
 var
   LStrings: TArray<string>;
@@ -684,6 +714,96 @@ begin
   AWriter.WriteEndArray;
 end;
 
+{ TJsonConverters.TBooleanConverter }
+
+function TJsonConverters.TBooleanConverter.CanConvert(
+  ATypeInf: PTypeInfo): Boolean;
+begin
+  Result := ATypeInf = TypeInfo(Boolean);
+end;
+
+function TJsonConverters.TBooleanConverter.ReadJson(const AReader: TJsonReader;
+  ATypeInf: PTypeInfo; const AExistingValue: TValue;
+  const ASerializer: TJsonSerializer): TValue;
+var
+  LBool: Boolean;
+begin
+  Result := AReader.Value;
+  // This is necessary when received a Boolean in string format
+  if Result.IsType<string> then
+  begin
+    LBool := StrToBool(Result.AsString);
+    TValue.Make(@LBool, AExistingValue.TypeInfo, Result);
+  end;
+end;
+
+procedure TJsonConverters.TBooleanConverter.WriteJson(
+  const AWriter: TJsonWriter; const AValue: TValue;
+  const ASerializer: TJsonSerializer);
+begin
+  AWriter.WriteValue(AValue);
+end;
+
+{ TJsonConverters.TInt64Converter }
+
+function TJsonConverters.TInt64Converter.CanConvert(
+  ATypeInf: PTypeInfo): Boolean;
+begin
+  Result := ATypeInf = TypeInfo(Int64);
+end;
+
+function TJsonConverters.TInt64Converter.ReadJson(const AReader: TJsonReader;
+  ATypeInf: PTypeInfo; const AExistingValue: TValue;
+  const ASerializer: TJsonSerializer): TValue;
+var
+  LOrdinal: Int64;
+begin
+  Result := AReader.Value;
+  // This is necessary when received a Int64 in string format
+  if Result.IsType<string> then
+  begin
+    LOrdinal := StrToInt64(Result.AsString);
+    TValue.Make(@LOrdinal, AExistingValue.TypeInfo, Result);
+  end;
+end;
+
+procedure TJsonConverters.TInt64Converter.WriteJson(
+  const AWriter: TJsonWriter; const AValue: TValue;
+  const ASerializer: TJsonSerializer);
+begin
+  AWriter.WriteValue(AValue);
+end;
+
+{ TJsonConverters.TUInt64Converter }
+
+function TJsonConverters.TUInt64Converter.CanConvert(
+  ATypeInf: PTypeInfo): Boolean;
+begin
+  Result := ATypeInf = TypeInfo(UInt64);
+end;
+
+function TJsonConverters.TUInt64Converter.ReadJson(const AReader: TJsonReader;
+  ATypeInf: PTypeInfo; const AExistingValue: TValue;
+  const ASerializer: TJsonSerializer): TValue;
+var
+  LOrdinal: UInt64;
+begin
+  Result := AReader.Value;
+  // This is necessary when received a UInt64 in string format
+  if Result.IsType<string> then
+  begin
+    LOrdinal := StrToUInt64(Result.AsString);
+    TValue.Make(@LOrdinal, AExistingValue.TypeInfo, Result);
+  end;
+end;
+
+procedure TJsonConverters.TUInt64Converter.WriteJson(
+  const AWriter: TJsonWriter; const AValue: TValue;
+  const ASerializer: TJsonSerializer);
+begin
+  AWriter.WriteValue(AValue);
+end;
+
 { TApiParam }
 
 constructor TApiParam.Create(const AArgIndex: Integer; const AIsDateTime: Boolean; const AKind: TTypeKind;
@@ -694,6 +814,38 @@ begin
   FIsDateTime := AIsDateTime;
   FKind := AKind;
   FName := AName;
+end;
+
+{ TApiProperty }
+
+procedure TApiProperty.CallMethod(const AMethodHandle: Pointer;
+  const AArgs: TArray<TValue>; var AResult: TValue;
+  var AProperties: TArray<TValue>);
+begin
+  if AMethodHandle = FGetMethod then
+    AResult := GetValue(AProperties)
+  else
+    AProperties[FIndex] := AArgs[1];
+end;
+
+constructor TApiProperty.Create(const AGetMethod, ASetMethod: TRttiMethod;
+  const AIndex: Integer);
+begin
+  inherited Create;
+  if AGetMethod.ReturnType.Handle <> ASetMethod.GetParameters[0].ParamType.Handle then
+    raise EipRestService.CreateFmt('Incompatible types of methods %s and %s', [AGetMethod.Name, ASetMethod.Name]);
+  FIsDateTime := TRttiUtils.IsDateTime(AGetMethod.ReturnType.Handle);
+  FKind := AGetMethod.ReturnType.TypeKind;
+  FName := AGetMethod.Name.Substring(3).ToLower;
+  FGetMethod := AGetMethod.Handle;
+  FIndex := AIndex;
+  FSetMethod := ASetMethod.Handle;
+  TValue.Make(nil, AGetMethod.ReturnType.Handle, FDefaultValue);
+end;
+
+function TApiProperty.GetValue(const AProperties: TArray<TValue>): TValue;
+begin
+  Result := AProperties[FIndex];
 end;
 
 { TApiMethod }
@@ -730,6 +882,7 @@ var
   LStr: string;
   LContentHeaderIndex: Integer;
   LMultipartFormData: TMultipartFormData;
+  LValue: TValue;
 begin
   if FTryFunction then
     AResult := False;
@@ -798,7 +951,19 @@ begin
           if FBodyArgIndex > -1 then
           begin
             if FBodyKind in [TTypeKind.tkClass, TTypeKind.tkInterface, TTypeKind.tkMRecord, TTypeKind.tkRecord] then
-              LBodyBytes := TEncoding.UTF8.GetBytes(AJsonSerializer.Serialize(AArgs[FBodyArgIndex]))
+            begin
+              try
+                LBodyBytes := TEncoding.UTF8.GetBytes(AJsonSerializer.Serialize(AArgs[FBodyArgIndex]));
+              except
+                on E: Exception do
+                begin
+                  if FTryFunction then
+                    Exit
+                  else
+                    Exception.RaiseOuterException(EipRestServiceJson.Create('Json serialization failed'));
+                end;
+              end;
+            end
             else
               LBodyBytes := TEncoding.UTF8.GetBytes(GetStringValue(AArgs[FBodyArgIndex], FBodyKind, FBodyIsDateTime));
             if Length(LBodyBytes) > 0 then
@@ -830,10 +995,7 @@ begin
       LBodyContent.Position := 0;
       // Set the default content type
       if LContentHeaderIndex = -1 then
-      begin
         LHeaders := LHeaders + [TNameValuePair.Create('Content-Type', CONTENTTYPE_APPLICATION_JSON)];
-        LContentHeaderIndex := Length(LHeaders) - 1;
-      end;
     end;
     LRelativeUrl := ABaseUrl + LRelativeUrl;
 
@@ -921,10 +1083,21 @@ begin
         TTypeKind.tkMRecord,
         TTypeKind.tkRecord:
           begin
+            try
+              LValue := AJsonSerializer.Deserialize(LResponseString, FResultTypeInfo);
+            except
+              on E: Exception do
+              begin
+                if FTryFunction then
+                  Exit
+                else
+                  Exception.RaiseOuterException(EipRestServiceJson.Create('Json deserialization failed'));
+              end;
+            end;
             if FTryFunction then
-              AArgs[FTryFunctionResultParameterIndex] := AJsonSerializer.Deserialize(LResponseString, FResultTypeInfo)
+              AArgs[FTryFunctionResultParameterIndex] := LValue
             else
-              AResult := AJsonSerializer.Deserialize(LResponseString, FResultTypeInfo);
+              AResult := LValue;
           end;
       else
         Assert(False);
@@ -999,6 +1172,8 @@ begin
   FTryFunction := False;
   FTryFunctionResultParameterIndex := -1;
   FQualifiedName := AQualifiedName;
+  if TRttiUtils.HasAttribute<HeaderAttribute>(AAttributes) then
+    raise EipRestService.CreateFmt('Cannot possible to use the attribute [Header()] in method "%s", it is reserved just for parameters. For methods, use the attribute [Headers()] in plural', [AQualifiedName]);
   LHeadersAttributes := TRttiUtils.Attributes<HeadersAttribute>(AAttributes);
   SetLength(FHeaders, Length(LHeadersAttributes));
   for I := 0 to Length(LHeadersAttributes)-1 do
@@ -1088,10 +1263,12 @@ begin
     if ARttiParameters[I].ParamType = nil then
       raise EipRestService.CreateFmt('Argument %s have a invalid type in method %s', [ARttiParameters[I].Name, FQualifiedName]);
     if TRttiUtils.HasAttribute<HeadersAttribute>(ARttiParameters[I].GetAttributes) then
-      raise EipRestService.CreateFmt('Argument %s have a invalid type in method %s', [ARttiParameters[I].Name, FQualifiedName]);
+      raise EipRestService.CreateFmt('Wrong declarations of the attribute [Headers()] in parameter "%s" in method "%s". The attribute Headers is just for methods or types (api interface type). To declare header in parameters use the attribute [Header()] in singular.', [ARttiParameters[I].Name, FQualifiedName]);
     LIsDateTime := TRttiUtils.IsDateTime(ARttiParameters[I].ParamType.Handle);
     if TRttiUtils.HasAttribute<HeaderAttribute>(ARttiParameters[I].GetAttributes, LHeaderAttribute) then
     begin
+      if LHeaderAttribute.Name.Contains(':') then
+        raise EipRestService.CreateFmt('You cannot declare the value of the header in attribute [Header()] of the parameter "%s" in method "%s". Please declare just the key of the header', [ARttiParameters[I].Name, FQualifiedName]);
       SetLength(FHeaderParameters, Length(FHeaderParameters) + 1);
       FHeaderParameters[Length(FHeaderParameters)-1] := TApiParam.Create(I + 1, LIsDateTime, ARttiParameters[I].ParamType.TypeKind, LHeaderAttribute.Name);
     end
@@ -1212,9 +1389,9 @@ var
   LAccept: string;
   LAcceptCharSet: string;
   LAuthenticator: TCustomAuthenticator;
-  LConnectionTimeout: Integer;
   LHandleRedirects: Boolean;
   {$IF CompilerVersion >= 34} // Delphi 10.4 Sydney
+  LConnectionTimeout: Integer;
   LReadTimeout: Integer;
   {$ENDIF}
   LSyncEvents: Boolean;
@@ -1232,8 +1409,6 @@ begin
       {$IF CompilerVersion >= 34} // Delphi 10.4 Sydney
       LConnectionTimeout := FClient.ConnectTimeout;
       LReadTimeout := FClient.ReadTimeout;
-      {$ELSE}
-      LConnectionTimeout := FClient.Timeout;
       {$ENDIF}
       LHandleRedirects := FClient.HandleRedirects;
       LSyncEvents := FClient.SynchronizedEvents;
@@ -1243,8 +1418,6 @@ begin
       {$IF CompilerVersion >= 34} // Delphi 10.4 Sydney
       FClient.ConnectTimeout := 10000;
       FClient.ReadTimeout := 10000;
-      {$ELSE}
-      FClient.Timeout := 10000;
       {$ENDIF}
       FClient.HandleRedirects := False;
       FClient.SynchronizedEvents := False;
@@ -1259,8 +1432,6 @@ begin
         {$IF CompilerVersion >= 34} // Delphi 10.4 Sydney
         FClient.ConnectTimeout := LConnectionTimeout;
         FClient.ReadTimeout := LReadTimeout;
-        {$ELSE}
-        FClient.Timeout := LConnectionTimeout;
         {$ENDIF}
         FClient.SynchronizedEvents := LSyncEvents;
       end;
@@ -1409,6 +1580,8 @@ begin
     end
     else
       LBaseUrl := '';
+    if TRttiUtils.HasAttribute<HeaderAttribute>(LRttiType.GetAttributes) then
+      raise EipRestService.Create('Cannot possible to use the attribute [Header()] in type declaration, it is reserved just for parameters. For type declarations, use the attribute [Headers()] in plural');
     LHeadersAttributes := TRttiUtils.Attributes<HeadersAttribute>(LRttiType.GetAttributes);
     SetLength(LInterfaceHeaders, Length(LHeadersAttributes));
     for I := 0 to Length(LHeadersAttributes)-1 do
@@ -1604,41 +1777,10 @@ begin
   end;
 end;
 
-{ TApiProperty }
-
-procedure TApiProperty.CallMethod(const AMethodHandle: Pointer;
-  const AArgs: TArray<TValue>; var AResult: TValue;
-  var AProperties: TArray<TValue>);
-begin
-  if AMethodHandle = FGetMethod then
-    AResult := GetValue(AProperties)
-  else
-    AProperties[FIndex] := AArgs[1];
-end;
-
-constructor TApiProperty.Create(const AGetMethod, ASetMethod: TRttiMethod;
-  const AIndex: Integer);
-begin
-  inherited Create;
-  if AGetMethod.ReturnType.Handle <> ASetMethod.GetParameters[0].ParamType.Handle then
-    raise EipRestService.CreateFmt('Incompatible types of methods %s and %s', [AGetMethod.Name, ASetMethod.Name]);
-  FIsDateTime := TRttiUtils.IsDateTime(AGetMethod.ReturnType.Handle);
-  FKind := AGetMethod.ReturnType.TypeKind;
-  FName := AGetMethod.Name.Substring(3).ToLower;
-  FGetMethod := AGetMethod.Handle;
-  FIndex := AIndex;
-  FSetMethod := ASetMethod.Handle;
-  TValue.Make(nil, AGetMethod.ReturnType.Handle, FDefaultValue);
-end;
-
-function TApiProperty.GetValue(const AProperties: TArray<TValue>): TValue;
-begin
-  Result := AProperties[FIndex];
-end;
-
 initialization
   GRestService := TRestServiceManager.Create;
-  GRestService.RegisterConverters([TipJsonEnumConverter, TipJsonSetConverter]);
+  GRestService.RegisterConverters([TJsonConverters.TEnumConverter, TJsonConverters.TSetConverter,
+    TJsonConverters.TBooleanConverter, TJsonConverters.TInt64Converter, TJsonConverters.TUInt64Converter]);
 finalization
   FreeAndNil(GRestService);
 end.

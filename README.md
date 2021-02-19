@@ -410,11 +410,12 @@ The GRestService instance generates an implementation of IGitHubApi that interna
   But this will raise an exception for the request in progress (EipRestServiceCanceled). More info in next topics.
   
   #### Handling exceptions
-  We have four exceptions that need to be considered when using the service
-  - EipRestService: general exception for declarations errors or internal errors
-  - EipRestServiceCanceled: exception generated when you call one method of the api and another thread call the CancelRequest (no problem here, you just need to consider this)
-  - EipRestServiceFailed = exception generated when rest service fails like connection fail or protocol errors
-  - EipRestServiceStatusCode = exception generated when received a status code different then 2xx;
+  We have five exceptions that need to be considered when using the service
+  - EipRestService: reserved for internal errors and wrong declarations of the rest api interface
+  - EipRestServiceCanceled: when you call one method of the api and another thread call the CancelRequest (no problem here, you just need to consider this)
+  - EipRestServiceFailed = when rest service fails like connection fail or protocol errors
+  - EipRestServiceJson = when the serialization / deserialization of json gives an error
+  - EipRestServiceStatusCode = when received a status code different then 2xx;
   
   To "silence" the exceptions see the next topic.
   
@@ -429,7 +430,7 @@ The GRestService instance generates an implementation of IGitHubApi that interna
       function TryGetUser(const AUser: string; out AResult: TUser): Boolean;
     end;
   ```
-  Now, the TryGetUser will "silence" the exceptions EipRestServiceCanceled, EipRestServiceFailed and EipRestServiceStatusCode.
+  Now, the TryGetUser will "silence" the exceptions EipRestServiceCanceled, EipRestServiceFailed, EipRestServiceJson and EipRestServiceStatusCode.
   
   #### Considerations
   The GRestService and the rest api interfaces created by it are thread safe.
