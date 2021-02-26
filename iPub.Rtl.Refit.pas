@@ -31,13 +31,11 @@ type
     property StatusText: string read FStatusText;
   end;
 
-
   { Attributes }
 
   TBodyContentKind = (Default, MultipartFormData);
 
-  // Parameter attribute
-  BodyAttribute = class(TCustomAttribute)
+  BodyAttribute = class(TCustomAttribute) // Parameter attribute
   strict private
     FBodyType: TBodyContentKind;
   public
@@ -45,8 +43,7 @@ type
     property BodyType: TBodyContentKind read FBodyType;
   end;
 
-  // Parameter attribute
-  HeaderAttribute = class(TCustomAttribute)
+  HeaderAttribute = class(TCustomAttribute) // Parameter attribute
   strict private
     FName: string;
   public
@@ -69,8 +66,7 @@ type
   PutAttribute = class(TipUrlAttribute);
   PatchAttribute = class(TipUrlAttribute);
 
-  // Method and type attribute
-  HeadersAttribute = class(TCustomAttribute)
+  HeadersAttribute = class(TCustomAttribute) // Method and type attribute
   strict private
     FName: string;
     FValue: string;
@@ -80,16 +76,14 @@ type
     property Value: string read FValue;
   end;
 
-  // Types attributes
-  BaseUrlAttribute = class(TipUrlAttribute);
+  BaseUrlAttribute = class(TipUrlAttribute); // Types attribute
 
 
-  { TipRestService }
-
-  // This class and the rest api interfaces created by this class are thread safe.
-  // As the connections are synchronous, the ideal is to call the api functions in
-  // the background. If you have multiple threads you can also create multiple rest
-  // api interfaces for the same api, each one will have a different connection.
+  /// <summary>Rest service to create the rest api consumer interfaces</summary>
+  /// <remarks>This class and the rest api interfaces created by this class are thread safe.
+  /// As the connections are synchronous, the ideal is to call the api functions in
+  /// the background. If you have multiple threads you can also create multiple rest
+  /// api interfaces for the same api, each one will have a different connection.</remarks>
   TipRestService = class abstract
   public
     type
@@ -117,37 +111,35 @@ type
   public
     function &For<T: IInterface>: T; overload;
     function &For<T: IInterface>(const ABaseUrl: string): T; overload;
-    // You can pass your own client, but you will be responsible for giving the client free after use the rest api interface returned
+    /// <summary>You can pass your own client, but you will be responsible for giving the client free after
+    /// use the rest api interface returned</summary>
     function &For<T: IInterface>(const AClient: TRESTClient; const ABaseUrl: string = ''; const AThreadSafe: Boolean = True; const AJsonSerializerClass: TApiJsonSerializerClass = nil): T; overload;
     procedure RegisterConverters(const AConverterClasses: TArray<TJsonConverterClass>); virtual; abstract;
-    // Default json serializer used internally, but you can access it for manual serializations
+    /// <summary>Default json serializer used internally, but you can access it for manual serializations</summary>
     property JsonSerializer: TApiJsonSerializer read GetJsonSerializer;
   end;
 
-
-  { IipRestApi }
-
-  // The rest api interface that you will declare, must be descendent of IipRestApi
-  {$M+}
+{$M+}
+  /// <summary>The base interface of your rest api consumer that will be used in GService.&For</summary>
   IipRestApi = interface
-    // You can cancel the current request (for example when you need to close the program), but will raise an
-    // exception EipRestServiceCanceled
+    /// <summary>You can cancel the current request (for example when you need to close the program),
+    /// but will raise an exception EipRestServiceCanceled</summary>
     procedure CancelRequest;
     function GetAuthenticator: TCustomAuthenticator;
     function GetJsonSerializer: TipRestService.TApiJsonSerializer;
     function GetResponse: TRESTResponse;
     procedure SetAuthenticator(AValue: TCustomAuthenticator);
-    // Set this authenticator is necessary when the api need a OAuth1 or OAuth2 for example, then you can use
-    // the native components like TOAuth2Authenticator. Then you will need to create and configure the
-    // authenticator by your self, set here and after finished all api calls you will need to destroy the authenticator
-    // (this rest service will not destroy it)
+    /// <summary>Set this authenticator is necessary when the api need a OAuth1 or OAuth2 for example, then you
+    /// can use the native components like TOAuth2Authenticator. Then you will need to create and configure the
+    /// authenticator by your self, set here and after finished all api calls you will need to destroy the
+    /// authenticator (this rest service will not destroy it)</summary>
     property Authenticator: TCustomAuthenticator read GetAuthenticator write SetAuthenticator;
-    // Json serializer used internally, but you can access it for manual serializations
+    /// <summary>Json serializer used internally, but you can access it for manual serializations</summary>
     property JsonSerializer: TipRestService.TApiJsonSerializer read GetJsonSerializer;
-    // The response will be useful when you need to use a TRESTResponseDataSetAdapter
+    /// <summary>The response will be useful when you need to use a TRESTResponseDataSetAdapter</summary>
     property Response: TRESTResponse read GetResponse;
   end;
-  {$M-}
+{$M-}
 
 var
   GRestService: TipRestService;
@@ -166,6 +158,9 @@ uses
   System.Net.URLClient,
   REST.Types;
 
+const
+  DELPHI_10_4_SYDNEY = 34.0;
+
 type
   TMethodKind = (Get, Post, Delete, Put, Patch);
 
@@ -177,6 +172,20 @@ type
     class function HasAttribute<T: TCustomAttribute>(const AAttributes: TArray<TCustomAttribute>): Boolean; overload; static;
     class function HasAttribute<T: TCustomAttribute>(const AAttributes: TArray<TCustomAttribute>; out AAttribute: T): Boolean; overload; static;
     class function IsDateTime(const ATypeInfo: PTypeInfo): Boolean; static;
+  end;
+
+  { TReadWriteLock }
+
+  TReadWriteLock = class
+  strict private
+    FLock: {$IF CompilerVersion >= DELPHI_10_4_SYDNEY}TLightweightMREW{$ELSE}TCriticalSection{$ENDIF};
+  public
+    constructor Create;
+    destructor Destroy; override;
+    procedure BeginRead;
+    procedure BeginWrite;
+    procedure EndRead;
+    procedure EndWrite;
   end;
 
   { TDefaultApiJsonSerializer }
@@ -197,12 +206,16 @@ type
       end;
   strict private
     FConverters: TArray<TJsonConverter>;
+    FLock: TReadWriteLock;
   protected
     function GetConverters: TArray<TJsonConverter>; override;
     function InternalDeserialize(const AJson: string; const ATypeInfo: PTypeInfo): TValue; override;
     procedure InternalPopulate(const AJson: string; var AValue: TValue); override;
     function InternalSerialize(const AValue: TValue): string; override;
     procedure SetConverters(const AConverters: TArray<TJsonConverter>); override;
+  public
+    constructor Create; override;
+    destructor Destroy; override;
   end;
 
   { TJsonConverters }
@@ -408,20 +421,14 @@ type
     FApiTypeMap: TDictionary<PTypeInfo, IApiType>;
     FConvertersList: TObjectList<TJsonConverter>;
     FJsonSerializer: TipRestService.TApiJsonSerializer;
-    {$IF CompilerVersion >= 34.0}
-    FLock: TLightweightMREW;
-    {$ELSE}
-    FLock: TCriticalSection;
-    {$ENDIF}
+    FLock: TReadWriteLock;
     function CreateApiType(const ATypeInfo: PTypeInfo): IApiType;
-  protected
+  strict protected
     function GetJsonSerializer: TipRestService.TApiJsonSerializer; override;
     procedure MakeFor(const ATypeInfo: Pointer; const AClient: TRESTClient; const ABaseUrl: string;
       const AThreadSafe: Boolean; const AJsonSerializerClass: TipRestService.TApiJsonSerializerClass; out AResult); override;
   public
-    {$IF CompilerVersion < 34.0}
     constructor Create;
-    {$ENDIF}
     destructor Destroy; override;
     procedure RegisterConverters(const AConverterClasses: TArray<TipRestService.TJsonConverterClass>); override;
   end;
@@ -577,6 +584,60 @@ begin
     (ATypeInfo = System.TypeInfo(TDateTime)) or (ATypeInfo = System.TypeInfo(TTime));
 end;
 
+{ TReadWriteLock }
+
+constructor TReadWriteLock.Create;
+begin
+  inherited Create;
+  {$IF CompilerVersion < DELPHI_10_4_SYDNEY}
+  FLock := TCriticalSection.Create;
+  {$ENDIF}
+end;
+
+destructor TReadWriteLock.Destroy;
+begin
+  {$IF CompilerVersion < DELPHI_10_4_SYDNEY}
+  FLock.Free;
+  {$ENDIF}
+  inherited;
+end;
+
+procedure TReadWriteLock.BeginRead;
+begin
+  {$IF CompilerVersion >= DELPHI_10_4_SYDNEY}
+  FLock.BeginRead;
+  {$ELSE}
+  FLock.Enter;
+  {$ENDIF}
+end;
+
+procedure TReadWriteLock.BeginWrite;
+begin
+  {$IF CompilerVersion >= DELPHI_10_4_SYDNEY}
+  FLock.BeginWrite;
+  {$ELSE}
+  FLock.Enter;
+  {$ENDIF}
+end;
+
+procedure TReadWriteLock.EndRead;
+begin
+  {$IF CompilerVersion >= DELPHI_10_4_SYDNEY}
+  FLock.EndRead;
+  {$ELSE}
+  FLock.Leave;
+  {$ENDIF}
+end;
+
+procedure TReadWriteLock.EndWrite;
+begin
+  {$IF CompilerVersion >= DELPHI_10_4_SYDNEY}
+  FLock.EndWrite;
+  {$ELSE}
+  FLock.Leave;
+  {$ENDIF}
+end;
+
 { TDefaultApiJsonSerializer.TJsonContractResolver }
 
 procedure TDefaultApiJsonSerializer.TJsonContractResolver.SetPropertySettingsFromAttributes(
@@ -653,9 +714,26 @@ end;
 
 { TDefaultApiJsonSerializer }
 
+constructor TDefaultApiJsonSerializer.Create;
+begin
+  inherited Create;
+  FLock := TReadWriteLock.Create;
+end;
+
+destructor TDefaultApiJsonSerializer.Destroy;
+begin
+  FLock.Free;
+  inherited;
+end;
+
 function TDefaultApiJsonSerializer.GetConverters: TArray<TJsonConverter>;
 begin
-  Result := Copy(FConverters);
+  FLock.BeginRead;
+  try
+    Result := Copy(FConverters);
+  finally
+    FLock.EndRead;
+  end;
 end;
 
 function TDefaultApiJsonSerializer.InternalDeserialize(const AJson: string;
@@ -703,7 +781,12 @@ end;
 
 procedure TDefaultApiJsonSerializer.SetConverters(const AConverters: TArray<TJsonConverter>);
 begin
-  FConverters := AConverters;
+  FLock.BeginWrite;
+  try
+    FConverters := AConverters;
+  finally
+    FLock.EndWrite;
+  end;
 end;
 
 { TJsonConverters.TEnumConverter }
@@ -1108,7 +1191,7 @@ begin
           Exception.RaiseOuterException(EipRestServiceFailed.Create('Service or connection failed'));
       end;
     end;
-    {$IF CompilerVersion >= 34} // Delphi 10.4 Sydney
+    {$IF CompilerVersion >= DELPHI_10_4_SYDNEY}
     if ARequest.IsCancelled then
     begin
       ACancelRequest^ := False;
@@ -1464,7 +1547,7 @@ var
   LAcceptCharSet: string;
   LAuthenticator: TCustomAuthenticator;
   LHandleRedirects: Boolean;
-  {$IF CompilerVersion >= 34} // Delphi 10.4 Sydney
+  {$IF CompilerVersion >= DELPHI_10_4_SYDNEY}
   LConnectionTimeout: Integer;
   LReadTimeout: Integer;
   {$ENDIF}
@@ -1480,7 +1563,7 @@ begin
       LAccept := FClient.Accept;
       LAcceptCharSet := FClient.AcceptCharSet;
       LAuthenticator := FClient.Authenticator;
-      {$IF CompilerVersion >= 34} // Delphi 10.4 Sydney
+      {$IF CompilerVersion >= DELPHI_10_4_SYDNEY}
       LConnectionTimeout := FClient.ConnectTimeout;
       LReadTimeout := FClient.ReadTimeout;
       {$ENDIF}
@@ -1489,7 +1572,7 @@ begin
       FClient.Accept := 'application/json';
       FClient.AcceptCharSet := 'utf-8';
       FClient.Authenticator := GetAuthenticator;
-      {$IF CompilerVersion >= 34} // Delphi 10.4 Sydney
+      {$IF CompilerVersion >= DELPHI_10_4_SYDNEY}
       FClient.ConnectTimeout := 10000;
       FClient.ReadTimeout := 10000;
       {$ENDIF}
@@ -1503,7 +1586,7 @@ begin
         FClient.AcceptCharSet := LAcceptCharSet;
         FClient.Authenticator := LAuthenticator;
         FClient.HandleRedirects := LHandleRedirects;
-        {$IF CompilerVersion >= 34} // Delphi 10.4 Sydney
+        {$IF CompilerVersion >= DELPHI_10_4_SYDNEY}
         FClient.ConnectTimeout := LConnectionTimeout;
         FClient.ReadTimeout := LReadTimeout;
         {$ENDIF}
@@ -1538,7 +1621,7 @@ end;
 procedure TApiVirtualInterface.CancelRequest;
 begin
   FCancelNextRequest := True;
-  {$IF CompilerVersion >= 34} // Delphi 10.4 Sydney
+  {$IF CompilerVersion >= DELPHI_10_4_SYDNEY}
   FRequest.Cancel;
   {$ENDIF}
 end;
@@ -1608,13 +1691,11 @@ end;
 
 { TRestServiceManager }
 
-{$IF CompilerVersion < 34.0}
 constructor TRestServiceManager.Create;
 begin
   inherited Create;
-  FLock := TCriticalSection.Create;
+  FLock := TReadWriteLock.Create;
 end;
-{$ENDIF}
 
 function TRestServiceManager.CreateApiType(
   const ATypeInfo: PTypeInfo): IApiType;
@@ -1766,9 +1847,7 @@ end;
 
 destructor TRestServiceManager.Destroy;
 begin
-  {$IF CompilerVersion < 34.0}
   FLock.Free;
-  {$ENDIF}
   if Assigned(FConvertersList) then
     FConvertersList.Free;
   if Assigned(FApiTypeMap) then
@@ -1779,55 +1858,27 @@ begin
 end;
 
 function TRestServiceManager.GetJsonSerializer: TipRestService.TApiJsonSerializer;
-
-  function _ConvertersListCount: Integer;
-  begin
-    if Assigned(FConvertersList) then
-      Result := FConvertersList.Count
-    else
-      Result := 0;
-  end;
-
 begin
-  {$IF CompilerVersion >= 34.0}
   FLock.BeginRead;
-  {$ELSE}
-  FLock.Enter;
-  {$ENDIF}
   try
     Result := FJsonSerializer;
-    if Assigned(Result) and (Length(Result.Converters) = _ConvertersListCount) then
-      Exit;
   finally
-    {$IF CompilerVersion >= 34.0}
     FLock.EndRead;
-    {$ELSE}
-    FLock.Leave;
-    {$ENDIF}
   end;
 
-  {$IF CompilerVersion >= 34.0}
-  FLock.BeginWrite;
-  {$ELSE}
-  FLock.Enter;
-  {$ENDIF}
-  try
-    if not Assigned(FJsonSerializer) then
-      FJsonSerializer := TDefaultApiJsonSerializer.Create;
-    Result := FJsonSerializer;
-    if Length(FJsonSerializer.Converters) <> _ConvertersListCount then
-    begin
-      if Assigned(FConvertersList) then
-        FJsonSerializer.SetConverters(FConvertersList.ToArray)
-      else
-        FJsonSerializer.SetConverters(nil);
+  if not Assigned(Result) then
+  begin
+    FLock.BeginWrite;
+    try
+      if not Assigned(FJsonSerializer) then
+      begin
+        FJsonSerializer := TDefaultApiJsonSerializer.Create;
+        FJsonSerializer.SetConverters(FConvertersList.ToArray);
+      end;
+      Result := FJsonSerializer;
+    finally
+      FLock.EndWrite;
     end;
-  finally
-    {$IF CompilerVersion >= 34.0}
-    FLock.EndWrite;
-    {$ELSE}
-    FLock.Leave;
-    {$ENDIF}
   end;
 end;
 
@@ -1842,11 +1893,7 @@ begin
   if PTypeInfo(ATypeInfo).Kind <> TTypeKind.tkInterface then
     raise EipRestService.Create('Invalid type');
 
-  {$IF CompilerVersion >= 34.0}
   FLock.BeginRead;
-  {$ELSE}
-  FLock.Enter;
-  {$ENDIF}
   try
     if Assigned(FApiTypeMap) then
       FApiTypeMap.TryGetValue(ATypeInfo, LApiType)
@@ -1857,21 +1904,13 @@ begin
     else
       LConverters := nil;
   finally
-    {$IF CompilerVersion >= 34.0}
     FLock.EndRead;
-    {$ELSE}
-    FLock.Leave;
-    {$ENDIF}
   end;
 
   if not Assigned(LApiType) then
   begin
     LApiType := CreateApiType(ATypeInfo);
-    {$IF CompilerVersion >= 34.0}
     FLock.BeginWrite;
-    {$ELSE}
-    FLock.Enter;
-    {$ENDIF}
     try
       if not Assigned(FApiTypeMap) then
         FApiTypeMap := TDictionary<PTypeInfo, IApiType>.Create;
@@ -1880,11 +1919,7 @@ begin
       else
         FApiTypeMap.Add(ATypeInfo, LApiType);
     finally
-      {$IF CompilerVersion >= 34.0}
       FLock.EndWrite;
-      {$ELSE}
-      FLock.Leave;
-      {$ENDIF}
     end;
   end;
 
@@ -1898,22 +1933,16 @@ procedure TRestServiceManager.RegisterConverters(
 var
   I: Integer;
 begin
-  {$IF CompilerVersion >= 34.0}
   FLock.BeginWrite;
-  {$ELSE}
-  FLock.Enter;
-  {$ENDIF}
   try
     if not Assigned(FConvertersList) then
       FConvertersList := TObjectList<TJsonConverter>.Create(True);
     for I := Length(AConverterClasses)-1 downto 0 do
       FConvertersList.Insert(0, AConverterClasses[I].Create);
+    if Assigned(FJsonSerializer) then
+      FJsonSerializer.SetConverters(FConvertersList.ToArray);
   finally
-    {$IF CompilerVersion >= 34.0}
     FLock.EndWrite;
-    {$ELSE}
-    FLock.Leave;
-    {$ENDIF}
   end;
 end;
 
