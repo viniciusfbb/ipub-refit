@@ -15,7 +15,8 @@ uses
   REST.Client;
 
 type
-  // Exceptions
+  { Exceptions }
+
   EipRestService = class(Exception);
   EipRestServiceCanceled = class(EipRestService);
   EipRestServiceFailed = class(EipRestService);
@@ -30,13 +31,8 @@ type
     property StatusText: string read FStatusText;
   end;
 
-  TipUrlAttribute = class abstract(TCustomAttribute)
-  strict private
-    FUrl: string;
-  public
-    constructor Create(const AUrl: string);
-    property Url: string read FUrl;
-  end;
+
+  { Attributes }
 
   TBodyContentKind = (Default, MultipartFormData);
 
@@ -56,6 +52,14 @@ type
   public
     constructor Create(const AName: string);
     property Name: string read FName;
+  end;
+
+  TipUrlAttribute = class abstract(TCustomAttribute)
+  strict private
+    FUrl: string;
+  public
+    constructor Create(const AUrl: string);
+    property Url: string read FUrl;
   end;
 
   // Methods attributes - Method kind and relative url
@@ -79,24 +83,6 @@ type
   // Types attributes
   BaseUrlAttribute = class(TipUrlAttribute);
 
-  // The rest api interface must be descendent of IipRestApi or inside the {$M+} directive
-  {$M+}
-  IipRestApi = interface
-    // You can cancel the current request (for example when you need to close the program), but will raise an
-    // exception EipRestServiceCanceled
-    procedure CancelRequest;
-    function GetAuthenticator: TCustomAuthenticator;
-    function GetResponse: TRESTResponse;
-    procedure SetAuthenticator(AValue: TCustomAuthenticator);
-    // Set this authenticator is necessary when the api need a OAuth1 or OAuth2 for example, then you can use
-    // the native components like TOAuth2Authenticator. Then you will need to create and configure the
-    // authenticator by your self, set here and after finished all api calls you will need to destroy the authenticator
-    // (this rest service will not destroy it)
-    property Authenticator: TCustomAuthenticator read GetAuthenticator write SetAuthenticator;
-    // The response will be useful when you need to use a TRESTResponseDataSetAdapter
-    property Response: TRESTResponse read GetResponse;
-  end;
-  {$M-}
 
   { TipRestService }
 
@@ -104,22 +90,29 @@ type
   // As the connections are synchronous, the ideal is to call the api functions in
   // the background. If you have multiple threads you can also create multiple rest
   // api interfaces for the same api, each one will have a different connection.
-  TipRestService = class
+  TipRestService = class abstract
   public
     type
-      TApiJsonSerializer = class
+      TApiJsonSerializer = class abstract
+      {$REGION ' - Internal use'}
       protected
-        function GetConverters: TList<TJsonConverter>; virtual; abstract;
+        function GetConverters: TArray<TJsonConverter>; virtual; abstract;
+        function InternalDeserialize(const AJson: string; const ATypeInfo: PTypeInfo): TValue; virtual; abstract;
+        procedure InternalPopulate(const AJson: string; var AValue: TValue); virtual; abstract;
+        function InternalSerialize(const AValue: TValue): string; virtual; abstract;
+        procedure SetConverters(const AConverters: TArray<TJsonConverter>); virtual; abstract;
+      {$ENDREGION}
       public
         constructor Create; virtual;
-        function Deserialize(const AJson: string; const ATypeInfo: PTypeInfo): TValue; virtual; abstract;
-        function Serialize(const AValue: TValue): string; virtual; abstract;
-        function SupportsConvertorsRegistration: Boolean; virtual; abstract;
-        property Converters: TList<TJsonConverter> read GetConverters;
+        function Deserialize<T>(const AJson: string): T;
+        procedure Populate<T>(const AJson: string; var AValue: T);
+        function Serialize<T>(const AValue: T): string;
+        property Converters: TArray<TJsonConverter> read GetConverters;
       end;
-      TJsonConverterClass = class of TJsonConverter;
       TApiJsonSerializerClass = class of TApiJsonSerializer;
+      TJsonConverterClass = class of TJsonConverter;
   protected
+    function GetJsonSerializer: TApiJsonSerializer; virtual; abstract;
     procedure MakeFor(const ATypeInfo: Pointer; const AClient: TRESTClient; const ABaseUrl: string; const AThreadSafe: Boolean; const AJsonSerializerClass: TApiJsonSerializerClass; out AResult); virtual; abstract;
   public
     function &For<T: IInterface>: T; overload;
@@ -127,7 +120,34 @@ type
     // You can pass your own client, but you will be responsible for giving the client free after use the rest api interface returned
     function &For<T: IInterface>(const AClient: TRESTClient; const ABaseUrl: string = ''; const AThreadSafe: Boolean = True; const AJsonSerializerClass: TApiJsonSerializerClass = nil): T; overload;
     procedure RegisterConverters(const AConverterClasses: TArray<TJsonConverterClass>); virtual; abstract;
+    // Default json serializer used internally, but you can access it for manual serializations
+    property JsonSerializer: TApiJsonSerializer read GetJsonSerializer;
   end;
+
+
+  { IipRestApi }
+
+  // The rest api interface that you will declare, must be descendent of IipRestApi
+  {$M+}
+  IipRestApi = interface
+    // You can cancel the current request (for example when you need to close the program), but will raise an
+    // exception EipRestServiceCanceled
+    procedure CancelRequest;
+    function GetAuthenticator: TCustomAuthenticator;
+    function GetJsonSerializer: TipRestService.TApiJsonSerializer;
+    function GetResponse: TRESTResponse;
+    procedure SetAuthenticator(AValue: TCustomAuthenticator);
+    // Set this authenticator is necessary when the api need a OAuth1 or OAuth2 for example, then you can use
+    // the native components like TOAuth2Authenticator. Then you will need to create and configure the
+    // authenticator by your self, set here and after finished all api calls you will need to destroy the authenticator
+    // (this rest service will not destroy it)
+    property Authenticator: TCustomAuthenticator read GetAuthenticator write SetAuthenticator;
+    // Json serializer used internally, but you can access it for manual serializations
+    property JsonSerializer: TipRestService.TApiJsonSerializer read GetJsonSerializer;
+    // The response will be useful when you need to use a TRESTResponseDataSetAdapter
+    property Response: TRESTResponse read GetResponse;
+  end;
+  {$M-}
 
 var
   GRestService: TipRestService;
@@ -176,16 +196,13 @@ type
         function Serialize(const AValue: TValue): string; overload;
       end;
   strict private
-    FJsonSerializer: TSystemJsonSerializer;
-  strict protected
-    function GetConverters: TList<TJsonConverter>; override;
-  public
-    constructor Create; override;
-    destructor Destroy; override;
-    function Deserialize(const AJson: string; const ATypeInfo: PTypeInfo): TValue; override;
-    function Serialize(const AValue: TValue): string; override;
-    function SupportsConvertorsRegistration: Boolean; override;
-    property Converters: TList<TJsonConverter> read GetConverters;
+    FConverters: TArray<TJsonConverter>;
+  protected
+    function GetConverters: TArray<TJsonConverter>; override;
+    function InternalDeserialize(const AJson: string; const ATypeInfo: PTypeInfo): TValue; override;
+    procedure InternalPopulate(const AJson: string; var AValue: TValue); override;
+    function InternalSerialize(const AValue: TValue): string; override;
+    procedure SetConverters(const AConverters: TArray<TJsonConverter>); override;
   end;
 
   { TJsonConverters }
@@ -311,6 +328,7 @@ type
     function GetBaseUrl: string;
     function GetCancelRequestMethod: Pointer;
     function GetIID: TGUID;
+    function GetJsonSerializerGetterMethod: Pointer;
     function GetMethods: TObjectDictionary<Pointer, TApiMethod>;
     function GetProperties: TObjectList<TApiProperty>;
     function GetPropertiesMethods: TDictionary<Pointer, TApiProperty>;
@@ -320,6 +338,7 @@ type
     property BaseUrl: string read GetBaseUrl;
     property CancelRequestMethod: Pointer read GetCancelRequestMethod;
     property IID: TGUID read GetIID;
+    property JsonSerializerGetterMethod: Pointer read GetJsonSerializerGetterMethod;
     property Methods: TObjectDictionary<Pointer, TApiMethod> read GetMethods;
     property Properties: TObjectList<TApiProperty> read GetProperties;
     property PropertiesMethods: TDictionary<Pointer, TApiProperty> read GetPropertiesMethods;
@@ -335,6 +354,7 @@ type
     FBaseUrl: string;
     FCancelRequestMethod: Pointer;
     FIID: TGUID;
+    FJsonSerializerGetterMethod: Pointer;
     FMethods: TObjectDictionary<Pointer, TApiMethod>;
     FProperties: TObjectList<TApiProperty>;
     FPropertiesMethods: TDictionary<Pointer, TApiProperty>;
@@ -344,6 +364,7 @@ type
     function GetBaseUrl: string;
     function GetCancelRequestMethod: Pointer;
     function GetIID: TGUID;
+    function GetJsonSerializerGetterMethod: Pointer;
     function GetMethods: TObjectDictionary<Pointer, TApiMethod>;
     function GetProperties: TObjectList<TApiProperty>;
     function GetPropertiesMethods: TDictionary<Pointer, TApiProperty>;
@@ -353,8 +374,8 @@ type
     constructor Create(const AAuthenticatorPropertyIndex: Integer; const ABaseUrl: string;
       const ACancelRequestMethod: Pointer; const AIID: TGUID;
       const AMethods: TObjectDictionary<Pointer, TApiMethod>; const AProperties: TObjectList<TApiProperty>;
-      const APropertiesMethods: TDictionary<Pointer, TApiProperty>; const AResponseGetterMethod: Pointer;
-      const ATypeInfo: PTypeInfo);
+      const APropertiesMethods: TDictionary<Pointer, TApiProperty>; const AJsonSerializerGetterMethod,
+      AResponseGetterMethod: Pointer; const ATypeInfo: PTypeInfo);
     destructor Destroy; override;
   end;
 
@@ -386,6 +407,7 @@ type
   strict private
     FApiTypeMap: TDictionary<PTypeInfo, IApiType>;
     FConvertersList: TObjectList<TJsonConverter>;
+    FJsonSerializer: TipRestService.TApiJsonSerializer;
     {$IF CompilerVersion >= 34.0}
     FLock: TLightweightMREW;
     {$ELSE}
@@ -393,6 +415,7 @@ type
     {$ENDIF}
     function CreateApiType(const ATypeInfo: PTypeInfo): IApiType;
   protected
+    function GetJsonSerializer: TipRestService.TApiJsonSerializer; override;
     procedure MakeFor(const ATypeInfo: Pointer; const AClient: TRESTClient; const ABaseUrl: string;
       const AThreadSafe: Boolean; const AJsonSerializerClass: TipRestService.TApiJsonSerializerClass; out AResult); override;
   public
@@ -456,6 +479,31 @@ end;
 constructor TipRestService.TApiJsonSerializer.Create;
 begin
   inherited Create;
+end;
+
+function TipRestService.TApiJsonSerializer.Deserialize<T>(
+  const AJson: string): T;
+begin
+  Result := InternalDeserialize(AJson, TypeInfo(T)).AsType<T>;
+end;
+
+procedure TipRestService.TApiJsonSerializer.Populate<T>(const AJson: string;
+  var AValue: T);
+var
+  LValue: TValue;
+begin
+  TValue.Make(@AValue, TypeInfo(T), LValue);
+  InternalPopulate(AJson, LValue);
+  AValue := LValue.AsType<T>;
+end;
+
+function TipRestService.TApiJsonSerializer.Serialize<T>(
+  const AValue: T): string;
+var
+  LValue: TValue;
+begin
+  TValue.Make(@AValue, TypeInfo(T), LValue);
+  Result := InternalSerialize(LValue);
 end;
 
 { TipRestService }
@@ -605,38 +653,57 @@ end;
 
 { TDefaultApiJsonSerializer }
 
-constructor TDefaultApiJsonSerializer.Create;
+function TDefaultApiJsonSerializer.GetConverters: TArray<TJsonConverter>;
 begin
-  inherited;
-  FJsonSerializer := TSystemJsonSerializer.Create;
-  FJsonSerializer.ContractResolver := TJsonContractResolver.Create;
+  Result := Copy(FConverters);
 end;
 
-function TDefaultApiJsonSerializer.Deserialize(const AJson: string;
+function TDefaultApiJsonSerializer.InternalDeserialize(const AJson: string;
   const ATypeInfo: PTypeInfo): TValue;
+var
+  LJsonSerializer: TSystemJsonSerializer;
 begin
-  Result := FJsonSerializer.Deserialize(AJson, ATypeInfo);
+  LJsonSerializer := TSystemJsonSerializer.Create;
+  try
+    LJsonSerializer.ContractResolver := TJsonContractResolver.Create;
+    LJsonSerializer.Converters.AddRange(FConverters);
+    Result := LJsonSerializer.Deserialize(AJson, ATypeInfo);
+  finally
+    LJsonSerializer.Free;
+  end;
 end;
 
-destructor TDefaultApiJsonSerializer.Destroy;
+procedure TDefaultApiJsonSerializer.InternalPopulate(const AJson: string; var AValue: TValue);
+var
+  LJsonSerializer: TSystemJsonSerializer;
 begin
-  FJsonSerializer.Free;
-  inherited;
+  LJsonSerializer := TSystemJsonSerializer.Create;
+  try
+    LJsonSerializer.ContractResolver := TJsonContractResolver.Create;
+    LJsonSerializer.Converters.AddRange(FConverters);
+    LJsonSerializer.Populate(AJson, AValue);
+  finally
+    LJsonSerializer.Free;
+  end;
 end;
 
-function TDefaultApiJsonSerializer.GetConverters: TList<TJsonConverter>;
+function TDefaultApiJsonSerializer.InternalSerialize(const AValue: TValue): string;
+var
+  LJsonSerializer: TSystemJsonSerializer;
 begin
-  Result := FJsonSerializer.Converters;
+  LJsonSerializer := TSystemJsonSerializer.Create;
+  try
+    LJsonSerializer.ContractResolver := TJsonContractResolver.Create;
+    LJsonSerializer.Converters.AddRange(FConverters);
+    Result := LJsonSerializer.Serialize(AValue);
+  finally
+    LJsonSerializer.Free;
+  end;
 end;
 
-function TDefaultApiJsonSerializer.Serialize(const AValue: TValue): string;
+procedure TDefaultApiJsonSerializer.SetConverters(const AConverters: TArray<TJsonConverter>);
 begin
-  Result := FJsonSerializer.Serialize(AValue);
-end;
-
-function TDefaultApiJsonSerializer.SupportsConvertorsRegistration: Boolean;
-begin
-  Result := True;
+  FConverters := AConverters;
 end;
 
 { TJsonConverters.TEnumConverter }
@@ -953,7 +1020,7 @@ begin
             if FBodyKind in [TTypeKind.tkClass, TTypeKind.tkInterface, TTypeKind.tkMRecord, TTypeKind.tkRecord] then
             begin
               try
-                LBodyBytes := TEncoding.UTF8.GetBytes(AJsonSerializer.Serialize(AArgs[FBodyArgIndex]));
+                LBodyBytes := TEncoding.UTF8.GetBytes(AJsonSerializer.InternalSerialize(AArgs[FBodyArgIndex]));
               except
                 on E: Exception do
                 begin
@@ -1084,7 +1151,7 @@ begin
         TTypeKind.tkRecord:
           begin
             try
-              LValue := AJsonSerializer.Deserialize(LResponseString, FResultTypeInfo);
+              LValue := AJsonSerializer.InternalDeserialize(LResponseString, FResultTypeInfo);
             except
               on E: Exception do
               begin
@@ -1314,13 +1381,15 @@ constructor TApiType.Create(const AAuthenticatorPropertyIndex: Integer;
   const AMethods: TObjectDictionary<Pointer, TApiMethod>;
   const AProperties: TObjectList<TApiProperty>;
   const APropertiesMethods: TDictionary<Pointer, TApiProperty>;
-  const AResponseGetterMethod: Pointer; const ATypeInfo: PTypeInfo);
+  const AJsonSerializerGetterMethod, AResponseGetterMethod: Pointer;
+  const ATypeInfo: PTypeInfo);
 begin
   inherited Create;
   FAuthenticatorPropertyIndex := AAuthenticatorPropertyIndex;
   FBaseUrl := ABaseUrl;
   FCancelRequestMethod := ACancelRequestMethod;
   FIID := AIID;
+  FJsonSerializerGetterMethod := AJsonSerializerGetterMethod;
   FMethods := AMethods;
   FProperties := AProperties;
   FPropertiesMethods := APropertiesMethods;
@@ -1354,6 +1423,11 @@ end;
 function TApiType.GetIID: TGUID;
 begin
   Result := FIID;
+end;
+
+function TApiType.GetJsonSerializerGetterMethod: Pointer;
+begin
+  Result := FJsonSerializerGetterMethod;
 end;
 
 function TApiType.GetMethods: TObjectDictionary<Pointer, TApiMethod>;
@@ -1455,6 +1529,8 @@ begin
     CancelRequest
   else if FApiType.ResponseGetterMethod = AMethodHandle then
     AResult := FResponse
+  else if FApiType.JsonSerializerGetterMethod = AMethodHandle then
+    AResult := FJsonSerializer
   else
     raise EipRestService.Create('Unexpected error calling the api');
 end;
@@ -1493,8 +1569,8 @@ begin
     FJsonSerializer := AJsonSerializerClass.Create
   else
     FJsonSerializer := TDefaultApiJsonSerializer.Create;
-  if (Length(AConverters) > 0) and FJsonSerializer.SupportsConvertorsRegistration then
-    FJsonSerializer.Converters.InsertRange(0, AConverters);
+  if Length(AConverters) > 0 then
+    FJsonSerializer.SetConverters(AConverters);
   if Assigned(AClient) then
     FClient := AClient
   else
@@ -1557,6 +1633,7 @@ var
   LHeadersAttributes: TArray<HeadersAttribute>;
   LProperties: TObjectList<TApiProperty>;
   LPropertiesMethods: TDictionary<Pointer, TApiProperty>;
+  LJsonSerializerGetterMethod: Pointer;
   LResponseGetterMethod: Pointer;
   LFound: Boolean;
   LIID: TGUID;
@@ -1564,6 +1641,7 @@ var
   I: Integer;
 begin
   LCancelRequestMethod := nil;
+  LJsonSerializerGetterMethod := nil;
   LResponseGetterMethod := nil;
   LMethods := TObjectDictionary<Pointer, TApiMethod>.Create([doOwnsValues]);
   LProperties := TObjectList<TApiProperty>.Create(True);
@@ -1601,6 +1679,12 @@ begin
           (LRttiMethod.ReturnType.Handle = TRESTResponse.ClassInfo) and not Assigned(LResponseGetterMethod) then
         begin
           LResponseGetterMethod := LRttiMethod.Handle;
+          Continue;
+        end;
+        if (LRttiMethod.Name.ToLower = 'getjsonserializer') and (Length(LRttiMethod.GetParameters) = 0) and (LRttiMethod.ReturnType <> nil) and
+          (LRttiMethod.ReturnType.Handle = TipRestService.TApiJsonSerializer.ClassInfo) and not Assigned(LJsonSerializerGetterMethod) then
+        begin
+          LJsonSerializerGetterMethod := LRttiMethod.Handle;
           Continue;
         end;
         if LMethods.ContainsKey(LRttiMethod.Handle) then
@@ -1676,7 +1760,8 @@ begin
     end;
   end;
   Result := TApiType.Create(LAuthenticatorPropertyIndex, LBaseUrl, LCancelRequestMethod,
-    LIID, LMethods, LProperties, LPropertiesMethods, LResponseGetterMethod, ATypeInfo);
+    LIID, LMethods, LProperties, LPropertiesMethods, LJsonSerializerGetterMethod,
+    LResponseGetterMethod, ATypeInfo);
 end;
 
 destructor TRestServiceManager.Destroy;
@@ -1688,7 +1773,62 @@ begin
     FConvertersList.Free;
   if Assigned(FApiTypeMap) then
     FApiTypeMap.Free;
+  if Assigned(FJsonSerializer) then
+    FJsonSerializer.Free;
   inherited;
+end;
+
+function TRestServiceManager.GetJsonSerializer: TipRestService.TApiJsonSerializer;
+
+  function _ConvertersListCount: Integer;
+  begin
+    if Assigned(FConvertersList) then
+      Result := FConvertersList.Count
+    else
+      Result := 0;
+  end;
+
+begin
+  {$IF CompilerVersion >= 34.0}
+  FLock.BeginRead;
+  {$ELSE}
+  FLock.Enter;
+  {$ENDIF}
+  try
+    Result := FJsonSerializer;
+    if Assigned(Result) and (Length(Result.Converters) = _ConvertersListCount) then
+      Exit;
+  finally
+    {$IF CompilerVersion >= 34.0}
+    FLock.EndRead;
+    {$ELSE}
+    FLock.Leave;
+    {$ENDIF}
+  end;
+
+  {$IF CompilerVersion >= 34.0}
+  FLock.BeginWrite;
+  {$ELSE}
+  FLock.Enter;
+  {$ENDIF}
+  try
+    if not Assigned(FJsonSerializer) then
+      FJsonSerializer := TDefaultApiJsonSerializer.Create;
+    Result := FJsonSerializer;
+    if Length(FJsonSerializer.Converters) <> _ConvertersListCount then
+    begin
+      if Assigned(FConvertersList) then
+        FJsonSerializer.SetConverters(FConvertersList.ToArray)
+      else
+        FJsonSerializer.SetConverters(nil);
+    end;
+  finally
+    {$IF CompilerVersion >= 34.0}
+    FLock.EndWrite;
+    {$ELSE}
+    FLock.Leave;
+    {$ENDIF}
+  end;
 end;
 
 procedure TRestServiceManager.MakeFor(const ATypeInfo: Pointer;
