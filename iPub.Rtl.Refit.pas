@@ -270,14 +270,14 @@ type
   strict private
     FArgIndex: Integer;
     FIsDateTime: Boolean;
-    FKind: TTypeKind;
     FName: string;
+    FTypeInfo: PTypeInfo;
   public
-    constructor Create(const AArgIndex: Integer; const AIsDateTime: Boolean; const AKind: TTypeKind; const AName: string);
+    constructor Create(const AArgIndex: Integer; const AIsDateTime: Boolean; const AName: string; const ATypeInfo: PTypeInfo);
     property ArgIndex: Integer read FArgIndex;
     property IsDateTime: Boolean read FIsDateTime;
-    property Kind: TTypeKind read FKind;
     property Name: string read FName;
+    property TypeInfo: PTypeInfo read FTypeInfo;
   end;
 
   { TApiProperty }
@@ -288,9 +288,9 @@ type
     FGetMethod: Pointer;
     FIndex: Integer;
     FIsDateTime: Boolean;
-    FKind: TTypeKind;
     FName: string;
     FSetMethod: Pointer;
+    FTypeInfo: PTypeInfo;
   public
     constructor Create(const AGetMethod, ASetMethod: TRttiMethod; const AIndex: Integer);
     procedure CallMethod(const AMethodHandle: Pointer; const AArgs: TArray<TValue>;
@@ -299,9 +299,9 @@ type
     property DefaultValue: TValue read FDefaultValue;
     property GetMethod: Pointer read FGetMethod;
     property IsDateTime: Boolean read FIsDateTime;
-    property Kind: TTypeKind read FKind;
     property Name: string read FName;
     property SetMethod: Pointer read FSetMethod;
+    property TypeInfo: PTypeInfo read FTypeInfo;
   end;
 
   { TApiMethod }
@@ -311,7 +311,7 @@ type
     FBodyArgIndex: Integer;
     FBodyContentKind: TBodyContentKind;
     FBodyIsDateTime: Boolean;
-    FBodyKind: TTypeKind;
+    FBodyTypeInfo: PTypeInfo;
     FKind: TMethodKind;
     FHeaderParameters: TArray<TApiParam>;
     FHeaders: TNameValueArray;
@@ -807,11 +807,18 @@ end;
 
 procedure TJsonConverters.TEnumConverter.WriteJson(const AWriter: TJsonWriter;
   const AValue: TValue; const ASerializer: TJsonSerializer);
+var
+  LEnumName: string;
 begin
   if (AValue.AsOrdinal < AValue.TypeData.MinValue) or (AValue.AsOrdinal > AValue.TypeData.MaxValue) then
     AWriter.WriteNull
   else
-    AWriter.WriteValue(GetEnumName(AValue.TypeInfo, AValue.AsOrdinal));
+  begin
+    LEnumName := GetEnumName(AValue.TypeInfo, AValue.AsOrdinal);
+    if LEnumName <> '' then
+      LEnumName := LEnumName.Chars[0].ToLower + LEnumName.Substring(1);
+    AWriter.WriteValue(LEnumName);
+  end;
 end;
 
 { TJsonConverters.TSetConverter }
@@ -956,14 +963,14 @@ end;
 
 { TApiParam }
 
-constructor TApiParam.Create(const AArgIndex: Integer; const AIsDateTime: Boolean; const AKind: TTypeKind;
-  const AName: string);
+constructor TApiParam.Create(const AArgIndex: Integer; const AIsDateTime: Boolean;
+  const AName: string; const ATypeInfo: PTypeInfo);
 begin
   inherited Create;
   FArgIndex := AArgIndex;
   FIsDateTime := AIsDateTime;
-  FKind := AKind;
   FName := AName;
+  FTypeInfo := ATypeInfo;
 end;
 
 { TApiProperty }
@@ -985,7 +992,7 @@ begin
   if AGetMethod.ReturnType.Handle <> ASetMethod.GetParameters[0].ParamType.Handle then
     raise EipRestService.CreateFmt('Incompatible types of methods %s and %s', [AGetMethod.Name, ASetMethod.Name]);
   FIsDateTime := TRttiUtils.IsDateTime(AGetMethod.ReturnType.Handle);
-  FKind := AGetMethod.ReturnType.TypeKind;
+  FTypeInfo := AGetMethod.ReturnType.Handle;
   FName := AGetMethod.Name.Substring(3).ToLower;
   FGetMethod := AGetMethod.Handle;
   FIndex := AIndex;
@@ -1005,9 +1012,29 @@ procedure TApiMethod.CallApi(const ABaseUrl: string;
   var AResult: TValue; const AProperties: TObjectList<TApiProperty>;
   const APropertiesValues: TArray<TValue>; const ACancelRequest: PBoolean; const ARequest: TRESTRequest);
 
-  function GetStringValue(const AValue: TValue; const ATypeKind: TTypeKind; const AIsDateTime: Boolean): string; inline;
+  function GetArrayStringValue(const AValue: TValue; const ATypeInfo: PTypeInfo): string;
+  var
+    LElementTypeInfoPtr: PPTypeInfo;
+    LTypeData: PTypeData;
   begin
-    case ATypeKind of
+    LTypeData := GetTypeData(ATypeInfo);
+    case ATypeInfo.Kind of
+      TTypeKind.tkArray: LElementTypeInfoPtr := LTypeData.ArrayData.ElType;
+      TTypeKind.tkDynArray: LElementTypeInfoPtr := LTypeData.DynArrElType;
+    else
+      LElementTypeInfoPtr := nil;
+    end;
+    if (LElementTypeInfoPtr = nil) or (LElementTypeInfoPtr^ = nil) then
+      raise EipRestService.Create('Unsupported element type for array type ' + ATypeInfo.NameFld.ToString);
+    if (LElementTypeInfoPtr^.Kind = tkInteger) and (LTypeData.OrdType = otUByte) then
+      Result := AValue.ToString
+    else
+      Result := AJsonSerializer.InternalSerialize(AValue);
+  end;
+
+  function GetStringValue(const AValue: TValue; const ATypeInfo: PTypeInfo; const AIsDateTime: Boolean): string; inline;
+  begin
+    case ATypeInfo.Kind of
       TTypeKind.tkFloat:
         begin
           if AIsDateTime then
@@ -1015,6 +1042,7 @@ procedure TApiMethod.CallApi(const ABaseUrl: string;
           else
             Result := AValue.AsExtended.ToString(TFormatSettings.Invariant);
         end;
+      TTypeKind.tkArray, TTypeKind.tkDynArray: Result := GetArrayStringValue(AValue, ATypeInfo);
     else
       Result := AValue.ToString;
     end;
@@ -1040,7 +1068,7 @@ begin
   SetLength(LHeaders, Length(LHeaders) + Length(FHeaderParameters));
   for I := 0 to Length(FHeaderParameters)-1 do
     LHeaders[Length(FHeaders) + I] := TNameValuePair.Create(FHeaderParameters[I].Name,
-      GetStringValue(AArgs[FHeaderParameters[I].ArgIndex], FHeaderParameters[I].Kind, FHeaderParameters[I].IsDateTime));
+      GetStringValue(AArgs[FHeaderParameters[I].ArgIndex], FHeaderParameters[I].TypeInfo, FHeaderParameters[I].IsDateTime));
   // Find and filling the masks of header values
   for I := 0 to Length(FHeaders)-1 do
   begin
@@ -1049,12 +1077,12 @@ begin
     begin
       if LStr.Contains('{' + FParameters[J].Name.ToLower + '}') then
       begin
-        LArgumentAsString := GetStringValue(AArgs[FParameters[J].ArgIndex], FParameters[J].Kind, FParameters[J].IsDateTime);
+        LArgumentAsString := GetStringValue(AArgs[FParameters[J].ArgIndex], FParameters[J].TypeInfo, FParameters[J].IsDateTime);
         LHeaders[I].Value := LHeaders[I].Value.Replace('{' + FParameters[J].Name + '}', LArgumentAsString, [rfReplaceAll, rfIgnoreCase]);
       end;
       if LStr.Contains('{a' + FParameters[J].Name.ToLower + '}') then
       begin
-        LArgumentAsString := GetStringValue(AArgs[FParameters[J].ArgIndex], FParameters[J].Kind, FParameters[J].IsDateTime);
+        LArgumentAsString := GetStringValue(AArgs[FParameters[J].ArgIndex], FParameters[J].TypeInfo, FParameters[J].IsDateTime);
         LHeaders[I].Value := LHeaders[I].Value.Replace('{a' + FParameters[J].Name + '}', LArgumentAsString, [rfReplaceAll, rfIgnoreCase]);
       end;
     end;
@@ -1062,7 +1090,7 @@ begin
     begin
       if LStr.Contains('{' + AProperties[J].Name + '}') then
       begin
-        LArgumentAsString := GetStringValue(AProperties[J].GetValue(APropertiesValues), AProperties[J].Kind, AProperties[J].IsDateTime);
+        LArgumentAsString := GetStringValue(AProperties[J].GetValue(APropertiesValues), AProperties[J].TypeInfo, AProperties[J].IsDateTime);
         LHeaders[I].Value := LHeaders[I].Value.Replace('{' + AProperties[J].Name + '}', LArgumentAsString, [rfReplaceAll, rfIgnoreCase]);
       end;
     end;
@@ -1079,7 +1107,7 @@ begin
   LRelativeUrl := FRelativeUrl;
   for I := 0 to Length(FParameters)-1 do
   begin
-    LArgumentAsString := GetStringValue(AArgs[FParameters[I].ArgIndex], FParameters[I].Kind, FParameters[I].IsDateTime);
+    LArgumentAsString := GetStringValue(AArgs[FParameters[I].ArgIndex], FParameters[I].TypeInfo, FParameters[I].IsDateTime);
     LRelativeUrl := LRelativeUrl.Replace('{' + FParameters[I].Name + '}', TNetEncoding.URL.EncodeForm(LArgumentAsString), [rfReplaceAll]);
   end;
   LStr := LRelativeUrl.ToLower;
@@ -1087,7 +1115,7 @@ begin
   begin
     if LStr.Contains('{' + AProperties[I].Name + '}') then
     begin
-      LArgumentAsString := GetStringValue(AProperties[I].GetValue(APropertiesValues), AProperties[I].Kind, AProperties[I].IsDateTime);
+      LArgumentAsString := GetStringValue(AProperties[I].GetValue(APropertiesValues), AProperties[I].TypeInfo, AProperties[I].IsDateTime);
       LRelativeUrl := LRelativeUrl.Replace('{' + AProperties[I].Name + '}', TNetEncoding.URL.EncodeForm(LArgumentAsString), [rfReplaceAll, rfIgnoreCase]);
     end;
   end;
@@ -1100,7 +1128,7 @@ begin
         TBodyContentKind.Default:
           if FBodyArgIndex > -1 then
           begin
-            if FBodyKind in [TTypeKind.tkClass, TTypeKind.tkInterface, TTypeKind.tkMRecord, TTypeKind.tkRecord] then
+            if Assigned(FBodyTypeInfo) and (FBodyTypeInfo.Kind in [TTypeKind.tkClass, TTypeKind.tkInterface, TTypeKind.tkMRecord, TTypeKind.tkRecord]) then
             begin
               try
                 LBodyBytes := TEncoding.UTF8.GetBytes(AJsonSerializer.InternalSerialize(AArgs[FBodyArgIndex]));
@@ -1115,7 +1143,7 @@ begin
               end;
             end
             else
-              LBodyBytes := TEncoding.UTF8.GetBytes(GetStringValue(AArgs[FBodyArgIndex], FBodyKind, FBodyIsDateTime));
+              LBodyBytes := TEncoding.UTF8.GetBytes(GetStringValue(AArgs[FBodyArgIndex], FBodyTypeInfo, FBodyIsDateTime));
             if Length(LBodyBytes) > 0 then
               LBodyContent.WriteBuffer(LBodyBytes, Length(LBodyBytes));
           end;
@@ -1350,8 +1378,8 @@ begin
       FRelativeUrl := TipUrlAttribute(AAttributes[I]).Url.Trim;
       if not FRelativeUrl.StartsWith('/') then
         FRelativeUrl := '/' + FRelativeUrl;
-      if Length(FRelativeUrl) = 1 then
-        raise EipRestService.CreateFmt('Invalid relative url in method %s', [FQualifiedName]);
+      //if Length(FRelativeUrl) = 1 then
+      //  raise EipRestService.CreateFmt('Invalid relative url in method %s', [FQualifiedName]);
       LFoundMethodKind := True;
       Break;
     end;
@@ -1402,7 +1430,7 @@ begin
   LParametersCount := 0;
   SetLength(FParameters, Length(ARttiParameters));
   FBodyArgIndex := -1;
-  FBodyKind := TTypeKind.tkUnknown;
+  FBodyTypeInfo := nil;
 
   for I := 0 to Length(ARttiParameters)-1 do
   begin
@@ -1420,7 +1448,7 @@ begin
       if LHeaderAttribute.Name.Contains(':') then
         raise EipRestService.CreateFmt('You cannot declare the value of the header in attribute [Header()] of the parameter "%s" in method "%s". Please declare just the key of the header', [ARttiParameters[I].Name, FQualifiedName]);
       SetLength(FHeaderParameters, Length(FHeaderParameters) + 1);
-      FHeaderParameters[Length(FHeaderParameters)-1] := TApiParam.Create(I + 1, LIsDateTime, ARttiParameters[I].ParamType.TypeKind, LHeaderAttribute.Name);
+      FHeaderParameters[Length(FHeaderParameters)-1] := TApiParam.Create(I + 1, LIsDateTime, LHeaderAttribute.Name, ARttiParameters[I].ParamType.Handle);
     end
     else
     begin
@@ -1432,11 +1460,11 @@ begin
           raise EipRestService.CreateFmt('The kind of the method %s does not permit a body content', [FQualifiedName]);
         FBodyArgIndex := I + 1;
         FBodyIsDateTime := LIsDateTime;
-        FBodyKind := ARttiParameters[I].ParamType.TypeKind;
+        FBodyTypeInfo := ARttiParameters[I].ParamType.Handle;
       end
       else
       begin
-        FParameters[LParametersCount] := TApiParam.Create(I + 1, LIsDateTime, ARttiParameters[I].ParamType.TypeKind, FixName(ARttiParameters[I].Name, FRelativeUrl));
+        FParameters[LParametersCount] := TApiParam.Create(I + 1, LIsDateTime, FixName(ARttiParameters[I].Name, FRelativeUrl), ARttiParameters[I].ParamType.Handle);
         Inc(LParametersCount);
       end;
     end;
@@ -1834,7 +1862,7 @@ begin
   LAuthenticatorPropertyIndex := -1;
   for I := 0 to LProperties.Count-1 do
   begin
-    if (LProperties[I].Name.ToLower = 'authenticator') and (LProperties[I].Kind = TTypeKind.tkClass) then
+    if (LProperties[I].Name.ToLower = 'authenticator') and (LProperties[I].TypeInfo.Kind = TTypeKind.tkClass) then
     begin
       LAuthenticatorPropertyIndex := I;
       Break;
