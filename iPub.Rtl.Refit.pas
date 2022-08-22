@@ -33,15 +33,17 @@ type
 
   { Attributes }
 
-  TBodyContentKind = (Default, MultipartFormData);
+  TBodyKind = (Json, Text, FormURLEncoded, MultipartFormData);
 
-  BodyAttribute = class(TCustomAttribute) // Parameter attribute
+  ContentTypeAttribute = class(TCustomAttribute) // Method attribute
   strict private
-    FBodyType: TBodyContentKind;
+    FBodyKind: TBodyKind;
   public
-    constructor Create(const ABodyType: TBodyContentKind = TBodyContentKind.Default);
-    property BodyType: TBodyContentKind read FBodyType;
+    constructor Create(const ABodyKind: TBodyKind);
+    property BodyKind: TBodyKind read FBodyKind;
   end;
+
+  BodyAttribute = class(TCustomAttribute); // Parameter attribute
 
   HeaderAttribute = class(TCustomAttribute) // Parameter attribute
   strict private
@@ -308,10 +310,8 @@ type
 
   TApiMethod = class
   strict private
-    FBodyArgIndex: Integer;
-    FBodyContentKind: TBodyContentKind;
-    FBodyIsDateTime: Boolean;
-    FBodyTypeInfo: PTypeInfo;
+    FBodyKind: TBodyKind;
+    FBodyParameters: TArray<TApiParam>;
     FKind: TMethodKind;
     FHeaderParameters: TArray<TApiParam>;
     FHeaders: TNameValueArray;
@@ -456,12 +456,12 @@ begin
   FUrl := AUrl;
 end;
 
-{ BodyAttribute }
+{ ContentTypeAttribute }
 
-constructor BodyAttribute.Create(const ABodyType: TBodyContentKind);
+constructor ContentTypeAttribute.Create(const ABodyKind: TBodyKind);
 begin
   inherited Create;
-  FBodyType := ABodyType;
+  FBodyKind := ABodyKind;
 end;
 
 { HeaderAttribute }
@@ -1032,7 +1032,7 @@ procedure TApiMethod.CallApi(const ABaseUrl: string;
       Result := AJsonSerializer.InternalSerialize(AValue);
   end;
 
-  function GetStringValue(const AValue: TValue; const ATypeInfo: PTypeInfo; const AIsDateTime: Boolean): string; inline;
+  function GetStringValue(const AValue: TValue; const ATypeInfo: PTypeInfo; const AIsDateTime: Boolean): string;
   begin
     case ATypeInfo.Kind of
       TTypeKind.tkFloat:
@@ -1043,6 +1043,7 @@ procedure TApiMethod.CallApi(const ABaseUrl: string;
             Result := AValue.AsExtended.ToString(TFormatSettings.Invariant);
         end;
       TTypeKind.tkArray, TTypeKind.tkDynArray: Result := GetArrayStringValue(AValue, ATypeInfo);
+      TTypeKind.tkRecord, TTypeKind.tkMRecord, TTypeKind.tkClass, TTypeKind.tkInterface: Result := AJsonSerializer.InternalSerialize(AValue);
     else
       Result := AValue.ToString;
     end;
@@ -1119,19 +1120,41 @@ begin
       LRelativeUrl := LRelativeUrl.Replace('{' + AProperties[I].Name + '}', TNetEncoding.URL.EncodeForm(LArgumentAsString), [rfReplaceAll, rfIgnoreCase]);
     end;
   end;
+  ARequest.Params.Clear;
   LBodyContent := nil;
   try
-    if FKind in CMethodsWithBodyContent then
+    if (FKind in CMethodsWithBodyContent) and (FBodyParameters <> nil) then
     begin
       LBodyContent := TMemoryStream.Create;
-      case FBodyContentKind of
-        TBodyContentKind.Default:
-          if FBodyArgIndex > -1 then
+      case FBodyKind of
+        TBodyKind.Text:
           begin
-            if Assigned(FBodyTypeInfo) and (FBodyTypeInfo.Kind in [TTypeKind.tkClass, TTypeKind.tkInterface, TTypeKind.tkMRecord, TTypeKind.tkRecord]) then
+            Assert(Length(FBodyParameters) = 1);
+            LBodyBytes := TEncoding.UTF8.GetBytes(GetStringValue(AArgs[FBodyParameters[0].ArgIndex], FBodyParameters[0].TypeInfo, FBodyParameters[0].IsDateTime));
+            if Length(LBodyBytes) > 0 then
+              LBodyContent.WriteBuffer(LBodyBytes, Length(LBodyBytes));
+            if LContentHeaderIndex = -1 then
+              LHeaders := LHeaders + [TNameValuePair.Create('Content-Type', CONTENTTYPE_TEXT_PLAIN)];
+          end;
+        TBodyKind.FormURLEncoded:
+          begin
+            for I := 0 to Length(FBodyParameters) - 1 do
+            begin
+              LArgumentAsString := GetStringValue(AArgs[FBodyParameters[I].ArgIndex], FBodyParameters[I].TypeInfo, FBodyParameters[I].IsDateTime);
+              if LArgumentAsString.IsEmpty then
+                Continue;
+              ARequest.AddParameter(FBodyParameters[I].Name, LArgumentAsString);
+            end;
+            if LContentHeaderIndex = -1 then
+              LHeaders := LHeaders + [TNameValuePair.Create('Content-Type', CONTENTTYPE_APPLICATION_X_WWW_FORM_URLENCODED)];
+          end;
+        TBodyKind.Json:
+          begin
+            Assert(Length(FBodyParameters) = 1);
+            if Assigned(FBodyParameters[0].TypeInfo) and (FBodyParameters[0].TypeInfo.Kind in [TTypeKind.tkClass, TTypeKind.tkInterface, TTypeKind.tkMRecord, TTypeKind.tkRecord]) then
             begin
               try
-                LBodyBytes := TEncoding.UTF8.GetBytes(AJsonSerializer.InternalSerialize(AArgs[FBodyArgIndex]));
+                LBodyBytes := TEncoding.UTF8.GetBytes(AJsonSerializer.InternalSerialize(AArgs[FBodyParameters[0].ArgIndex]));
               except
                 on E: Exception do
                 begin
@@ -1141,39 +1164,39 @@ begin
                     Exception.RaiseOuterException(EipRestServiceJson.Create('Json serialization failed'));
                 end;
               end;
+              if LContentHeaderIndex = -1 then
+                LHeaders := LHeaders + [TNameValuePair.Create('Content-Type', CONTENTTYPE_APPLICATION_JSON)];
             end
             else
-              LBodyBytes := TEncoding.UTF8.GetBytes(GetStringValue(AArgs[FBodyArgIndex], FBodyTypeInfo, FBodyIsDateTime));
+            begin
+              LBodyBytes := TEncoding.UTF8.GetBytes(GetStringValue(AArgs[FBodyParameters[0].ArgIndex], FBodyParameters[0].TypeInfo, FBodyParameters[0].IsDateTime));
+              if LContentHeaderIndex = -1 then
+                LHeaders := LHeaders + [TNameValuePair.Create('Content-Type', CONTENTTYPE_TEXT_PLAIN)];
+            end;
             if Length(LBodyBytes) > 0 then
               LBodyContent.WriteBuffer(LBodyBytes, Length(LBodyBytes));
           end;
-        TBodyContentKind.MultipartFormData:
+        TBodyKind.MultipartFormData:
           begin
-            if AArgs[FBodyArgIndex].IsInstanceOf(TMultipartFormData) then
-            begin
-              LMultipartFormData := TMultipartFormData(AArgs[FBodyArgIndex].AsObject);
-              LMultipartFormData.Stream.Position := 0;
-              // You can optimize by using the LMultipartFormData.Stream directly but you need to handle the flow of freeing LBodyContent
-              LBodyContent.CopyFrom(LMultipartFormData.Stream, LMultipartFormData.Stream.Size);
-              // Make sure content type is valid
-              if LContentHeaderIndex > -1 then
-                LHeaders[LContentHeaderIndex].Value := LMultipartFormData.MimeTypeHeader
-              else
-              begin
-                LHeaders := LHeaders + [TNameValuePair.Create('Content-Type', LMultipartFormData.MimeTypeHeader)];
-                LContentHeaderIndex := Length(LHeaders) - 1;
-              end;
-            end
+            Assert(Length(FBodyParameters) = 1);
+            Assert(AArgs[FBodyParameters[0].ArgIndex].IsInstanceOf(TMultipartFormData));
+            LMultipartFormData := TMultipartFormData(AArgs[FBodyParameters[0].ArgIndex].AsObject);
+            LMultipartFormData.Stream.Position := 0;
+            // You can optimize by using the LMultipartFormData.Stream directly but you need to handle the flow of freeing LBodyContent
+            LBodyContent.CopyFrom(LMultipartFormData.Stream, LMultipartFormData.Stream.Size);
+            // Make sure content type is valid
+            if LContentHeaderIndex > -1 then
+              LHeaders[LContentHeaderIndex].Value := LMultipartFormData.MimeTypeHeader
             else
-              raise EipRestService.Create('Body content kind set to "TBodyContentKind.MultipartFormData" but content is not of "TMultipartFormData"');
+            begin
+              LHeaders := LHeaders + [TNameValuePair.Create('Content-Type', LMultipartFormData.MimeTypeHeader)];
+              LContentHeaderIndex := Length(LHeaders) - 1;
+            end;
           end;
       else
         Assert(False);
       end;
       LBodyContent.Position := 0;
-      // Set the default content type
-      if LContentHeaderIndex = -1 then
-        LHeaders := LHeaders + [TNameValuePair.Create('Content-Type', CONTENTTYPE_APPLICATION_JSON)];
     end;
     LRelativeUrl := ABaseUrl + LRelativeUrl;
 
@@ -1187,7 +1210,6 @@ begin
       Assert(False);
     end;
     ARequest.Client.BaseURL := LRelativeUrl;
-    ARequest.Params.Clear;
     ARequest.ClearBody;
     if Assigned(LBodyContent) then
       ARequest.AddBody(LBodyContent);
@@ -1292,32 +1314,61 @@ end;
 constructor TApiMethod.Create(const AQualifiedName: string;
   const ATypeHeaders: TNameValueArray; const ARttiParameters: TArray<TRttiParameter>;
   const ARttiReturnType: TRttiType; const AAttributes: TArray<TCustomAttribute>);
+type
+  TBodyKindDetected = (Undefined, Json, Text, FormURLEncoded, MultipartFormData);
 
-  function IsBodyParam(const ARttiParameter: TRttiParameter; out ABodyContentKind: TBodyContentKind): Boolean;
-  var
-    LBodyAttribute: BodyAttribute;
-    LName: string;
+  function IsBodyName(AName: string): Boolean;
   begin
-    LName := ARttiParameter.Name.ToLower;
-    Result := (LName = 'abody') or
-      (LName = 'body') or
-      (LName = 'bodycontent') or
-      (LName = 'abodycontent') or
-      (LName = 'content') or
-      (LName = 'acontent');
-    if not Result then
+    AName := AName.ToLower;
+    Result := (AName = 'abody') or
+      (AName = 'body') or
+      (AName = 'bodycontent') or
+      (AName = 'abodycontent') or
+      (AName = 'content') or
+      (AName = 'acontent');
+  end;
+
+  function IsBodyParam(const ARttiParameter: TRttiParameter;
+     const ACurrentBodyArgsCount: Integer; var AIsBodyOnlyText: Boolean;
+     var ABodyKind: TBodyKindDetected): Boolean;
+  const
+    CBodyKindsWithOneArgAllowed: set of TBodyKindDetected = [TBodyKindDetected.Json, TBodyKindDetected.Text, TBodyKindDetected.MultipartFormData];
+  begin
+    Result := IsBodyName(ARttiParameter.Name) or TRttiUtils.HasAttribute<BodyAttribute>(ARttiParameter.GetAttributes);
+
+    if (ARttiParameter.ParamType.TypeKind = TTypeKind.tkClass) and
+      (ARttiParameter.ParamType.Handle.TypeData.ClassType.InheritsFrom(TMultipartFormData)) then
     begin
-      Result := TRttiUtils.HasAttribute<BodyAttribute>(ARttiParameter.GetAttributes, LBodyAttribute);
-      if Result then
-        ABodyContentKind := LBodyAttribute.BodyType
-      else
-        ABodyContentKind := TBodyContentKind.Default;
+      if ABodyKind = TBodyKindDetected.Undefined then
+        ABodyKind := TBodyKindDetected.MultipartFormData;
+      if ABodyKind <> TBodyKindDetected.MultipartFormData then
+        raise EipRestService.CreateFmt('Wrong body content type. Expected MultipartFormData in method "%s".', [FQualifiedName]);
+      Result := True;
     end
-    // You can declare the body of type TMultipartFormData with out the attribute
-    else if ARttiParameter.ParamType.Name = 'TMultipartFormData' then
-      ABodyContentKind := TBodyContentKind.MultipartFormData
-    else
-      ABodyContentKind := TBodyContentKind.Default
+    else if Result and (ABodyKind = TBodyKindDetected.MultipartFormData) then
+      raise EipRestService.CreateFmt('Body content kind set to "TBodyKind.MultipartFormData" but the argument "%s" is not of "TMultipartFormData" in method "%s"', [ARttiParameter.Name, FQualifiedName]);
+
+    if Result then
+    begin
+      if ABodyKind = TBodyKindDetected.Undefined then
+      begin
+        if ACurrentBodyArgsCount > 0 then
+          ABodyKind := TBodyKindDetected.FormURLEncoded
+        else if (ARttiParameter.ParamType.TypeKind in [TTypeKind.tkClass, TTypeKind.tkInterface, TTypeKind.tkRecord, TTypeKind.tkMRecord]) then
+          ABodyKind := TBodyKindDetected.Json;
+      end;
+      if (ABodyKind = TBodyKindDetected.Text) and not (ARttiParameter.ParamType.TypeKind in [TTypeKind.tkInteger, TTypeKind.tkChar,
+        TTypeKind.tkEnumeration, TTypeKind.tkFloat, TTypeKind.tkString, TTypeKind.tkSet, TTypeKind.tkWChar, TTypeKind.tkLString,
+        TTypeKind.tkWString, TTypeKind.tkInt64, TTypeKind.tkUString, TTypeKind.tkArray, TTypeKind.tkDynArray]) then
+      begin
+        raise EipRestService.CreateFmt('The argument "%s" in method "%s" is not valid for text body content type.', [ARttiParameter.Name, FQualifiedName]);
+      end;
+      if (ACurrentBodyArgsCount > 0) and (ABodyKind in CBodyKindsWithOneArgAllowed) then
+        raise EipRestService.CreateFmt('The body content type in method "%s" requires just one body argument.', [FQualifiedName]);
+    end;
+
+    if Result then
+      AIsBodyOnlyText := AIsBodyOnlyText and (ARttiParameter.ParamType.TypeKind = TTypeKind.tkString);
   end;
 
   function FixName(const AName: string; var ARelativeUrl: string): string;
@@ -1343,7 +1394,10 @@ var
   LIsDateTime: Boolean;
   LHeadersAttributes: TArray<HeadersAttribute>;
   LHeaderAttribute: HeaderAttribute;
+  LContentTypeAttribute: ContentTypeAttribute;
+  LBodyKindDetected: TBodyKindDetected;
   LRttiReturnType: TRttiType;
+  LIsBodyOnlyText: Boolean;
   I: Integer;
 begin
   inherited Create;
@@ -1357,6 +1411,10 @@ begin
   for I := 0 to Length(LHeadersAttributes)-1 do
     FHeaders[I] := TNameValuePair.Create(LHeadersAttributes[I].Name, LHeadersAttributes[I].Value);
   FHeaders := ATypeHeaders + FHeaders;
+  if TRttiUtils.HasAttribute<ContentTypeAttribute>(AAttributes, LContentTypeAttribute) then
+    LBodyKindDetected := TBodyKindDetected(Ord(LContentTypeAttribute.BodyKind) + 1)
+  else
+    LBodyKindDetected := TBodyKindDetected.Undefined;
 
   LFoundMethodKind := False;
   for I := 0 to Length(AAttributes)-1 do
@@ -1429,8 +1487,8 @@ begin
 
   LParametersCount := 0;
   SetLength(FParameters, Length(ARttiParameters));
-  FBodyArgIndex := -1;
-  FBodyTypeInfo := nil;
+  FBodyParameters := nil;
+  LIsBodyOnlyText := True;
 
   for I := 0 to Length(ARttiParameters)-1 do
   begin
@@ -1452,15 +1510,11 @@ begin
     end
     else
     begin
-      if IsBodyParam(ARttiParameters[I], FBodyContentKind) then
+      if IsBodyParam(ARttiParameters[I], Length(FBodyParameters), LIsBodyOnlyText, LBodyKindDetected) then
       begin
-        if FBodyArgIndex <> -1 then
-          raise EipRestService.CreateFmt('Found two content body argument in method %s', [FQualifiedName]);
         if not (FKind in CMethodsWithBodyContent) then
           raise EipRestService.CreateFmt('The kind of the method %s does not permit a body content', [FQualifiedName]);
-        FBodyArgIndex := I + 1;
-        FBodyIsDateTime := LIsDateTime;
-        FBodyTypeInfo := ARttiParameters[I].ParamType.Handle;
+        FBodyParameters := FBodyParameters + [TApiParam.Create(I + 1, LIsDateTime, FixName(ARttiParameters[I].Name, FRelativeUrl), ARttiParameters[I].ParamType.Handle)];
       end
       else
       begin
@@ -1469,6 +1523,23 @@ begin
       end;
     end;
   end;
+
+  if LBodyKindDetected = TBodyKindDetected.Undefined then
+  begin
+    if FBodyParameters = nil then
+      FBodyKind := TBodyKind.Json
+    else if Length(FBodyParameters) = 1 then
+    begin
+      if LIsBodyOnlyText and IsBodyName(FBodyParameters[0].Name) then
+        FBodyKind := TBodyKind.Text
+      else
+        FBodyKind := TBodyKind.FormURLEncoded;
+    end
+    else
+      raise EipRestService.CreateFmt('You should declare the attribute [ContentType()] in method "%s"', [FQualifiedName]);
+  end
+  else
+    FBodyKind := TBodyKind(Ord(LBodyKindDetected) - 1);
 
   if Length(FParameters) <> LParametersCount then
     SetLength(FParameters, LParametersCount);
@@ -1482,6 +1553,8 @@ begin
     FParameters[I].Free;
   for I := 0 to Length(FHeaderParameters)-1 do
     FHeaderParameters[I].Free;
+  for I := 0 to Length(FBodyParameters)-1 do
+    FBodyParameters[I].Free;
   inherited;
 end;
 
