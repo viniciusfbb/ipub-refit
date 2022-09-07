@@ -271,12 +271,14 @@ type
   TApiParam = class
   strict private
     FArgIndex: Integer;
+    FIsBytes: Boolean;
     FIsDateTime: Boolean;
     FName: string;
     FTypeInfo: PTypeInfo;
   public
-    constructor Create(const AArgIndex: Integer; const AIsDateTime: Boolean; const AName: string; const ATypeInfo: PTypeInfo);
+    constructor Create(const AArgIndex: Integer; const AIsBytes, AIsDateTime: Boolean; const AName: string; const ATypeInfo: PTypeInfo);
     property ArgIndex: Integer read FArgIndex;
+    property IsBytes: Boolean read FIsBytes;
     property IsDateTime: Boolean read FIsDateTime;
     property Name: string read FName;
     property TypeInfo: PTypeInfo read FTypeInfo;
@@ -966,11 +968,12 @@ end;
 
 { TApiParam }
 
-constructor TApiParam.Create(const AArgIndex: Integer; const AIsDateTime: Boolean;
-  const AName: string; const ATypeInfo: PTypeInfo);
+constructor TApiParam.Create(const AArgIndex: Integer; const AIsBytes,
+  AIsDateTime: Boolean; const AName: string; const ATypeInfo: PTypeInfo);
 begin
   inherited Create;
   FArgIndex := AArgIndex;
+  FIsBytes := AIsBytes;
   FIsDateTime := AIsDateTime;
   FName := AName;
   FTypeInfo := ATypeInfo;
@@ -1180,26 +1183,45 @@ begin
               LBodyContent.WriteBuffer(LBodyBytes, Length(LBodyBytes));
           end;
         TBodyKind.MultipartFormData:
+          if FBodyParameters <> nil then
           begin
-            Assert(FMultipartFormDataParamIndex <> -1);
-            Assert(AArgs[FBodyParameters[FMultipartFormDataParamIndex].ArgIndex].IsInstanceOf(TMultipartFormData));
-            LMultipartFormData := TMultipartFormData(AArgs[FBodyParameters[FMultipartFormDataParamIndex].ArgIndex].AsObject);
-            for I := 0 to Length(FBodyParameters) - 1 do
-            begin
-              if I = FMultipartFormDataParamIndex then
-                Continue;
-              LArgumentAsString := GetStringValue(AArgs[FBodyParameters[I].ArgIndex], FBodyParameters[I].TypeInfo, FBodyParameters[I].IsDateTime);
-              if not LArgumentAsString.IsEmpty then
-                LMultipartFormData.AddField(FBodyParameters[I].Name, LArgumentAsString);
-            end;
-            LMultipartFormData.Stream.Position := 0;
-            // You can optimize by using the LMultipartFormData.Stream directly but you need to handle the flow of freeing LBodyContent
-            LBodyContent.CopyFrom(LMultipartFormData.Stream, LMultipartFormData.Stream.Size);
-            // Make sure content type is valid
-            if LContentHeaderIndex > -1 then
-              LHeaders[LContentHeaderIndex].Value := LMultipartFormData.MimeTypeHeader
+            if FMultipartFormDataParamIndex <> -1 then
+              LMultipartFormData := TMultipartFormData(AArgs[FBodyParameters[FMultipartFormDataParamIndex].ArgIndex].AsObject)
             else
-              LHeaders := LHeaders + [TNameValuePair.Create('Content-Type', LMultipartFormData.MimeTypeHeader)];
+              LMultipartFormData := TMultipartFormData.Create;
+            try
+              for I := 0 to Length(FBodyParameters) - 1 do
+              begin
+                if I = FMultipartFormDataParamIndex then
+                  Continue;
+                if (FBodyParameters[I].TypeInfo.Kind = TTypeKind.tkClass) and AArgs[FBodyParameters[I].ArgIndex].IsInstanceOf(TStream) then
+                  LMultipartFormData.AddStream(FBodyParameters[I].Name, TStream(AArgs[FBodyParameters[I].ArgIndex].AsObject))
+                else if FBodyParameters[I].IsBytes then
+                  LMultipartFormData.AddBytes(FBodyParameters[I].Name, AArgs[FBodyParameters[I].ArgIndex].AsType<TBytes>)
+                else
+                begin
+                  LArgumentAsString := GetStringValue(AArgs[FBodyParameters[I].ArgIndex], FBodyParameters[I].TypeInfo, FBodyParameters[I].IsDateTime);
+                  if not LArgumentAsString.IsEmpty then
+                  begin
+                    if FBodyParameters[I].TypeInfo = TypeInfo(TFileName) then
+                      LMultipartFormData.AddFile(FBodyParameters[I].Name, LArgumentAsString)
+                    else
+                      LMultipartFormData.AddField(FBodyParameters[I].Name, LArgumentAsString);
+                  end;
+                end;
+              end;
+              LMultipartFormData.Stream.Position := 0;
+              // You can optimize by using the LMultipartFormData.Stream directly but you need to handle the flow of freeing LBodyContent
+              LBodyContent.CopyFrom(LMultipartFormData.Stream, LMultipartFormData.Stream.Size);
+              // Make sure content type is valid
+              if LContentHeaderIndex > -1 then
+                LHeaders[LContentHeaderIndex].Value := LMultipartFormData.MimeTypeHeader
+              else
+                LHeaders := LHeaders + [TNameValuePair.Create('Content-Type', LMultipartFormData.MimeTypeHeader)];
+            finally
+              if FMultipartFormDataParamIndex = -1 then
+                LMultipartFormData.Free;
+            end;
           end;
       else
         Assert(False);
@@ -1394,6 +1416,11 @@ type
     end;
   end;
 
+  function IsBytes(const ATypeInfo: PTypeInfo): Boolean; inline;
+  begin
+    Result := (ATypeInfo.Kind = TTypeKind.tkDynArray) and (GetTypeData(ATypeInfo).OrdType	= TOrdType.otUByte);
+  end;
+
 var
   LParametersCount: Integer;
   LFoundMethodKind: Boolean;
@@ -1513,7 +1540,7 @@ begin
       if LHeaderAttribute.Name.Contains(':') then
         raise EipRestService.CreateFmt('You cannot declare the value of the header in attribute [Header()] of the parameter "%s" in method "%s". Please declare just the key of the header', [ARttiParameters[I].Name, FQualifiedName]);
       SetLength(FHeaderParameters, Length(FHeaderParameters) + 1);
-      FHeaderParameters[Length(FHeaderParameters)-1] := TApiParam.Create(I + 1, LIsDateTime, LHeaderAttribute.Name, ARttiParameters[I].ParamType.Handle);
+      FHeaderParameters[Length(FHeaderParameters)-1] := TApiParam.Create(I + 1, IsBytes(ARttiParameters[I].ParamType.Handle), LIsDateTime, LHeaderAttribute.Name, ARttiParameters[I].ParamType.Handle);
     end
     else
     begin
@@ -1521,11 +1548,11 @@ begin
       begin
         if not (FKind in CMethodsWithBodyContent) then
           raise EipRestService.CreateFmt('The kind of the method %s does not permit a body content', [FQualifiedName]);
-        FBodyParameters := FBodyParameters + [TApiParam.Create(I + 1, LIsDateTime, FixName(ARttiParameters[I].Name, FRelativeUrl), ARttiParameters[I].ParamType.Handle)];
+        FBodyParameters := FBodyParameters + [TApiParam.Create(I + 1, IsBytes(ARttiParameters[I].ParamType.Handle), LIsDateTime, FixName(ARttiParameters[I].Name, FRelativeUrl), ARttiParameters[I].ParamType.Handle)];
       end
       else
       begin
-        FParameters[LParametersCount] := TApiParam.Create(I + 1, LIsDateTime, FixName(ARttiParameters[I].Name, FRelativeUrl), ARttiParameters[I].ParamType.Handle);
+        FParameters[LParametersCount] := TApiParam.Create(I + 1, IsBytes(ARttiParameters[I].ParamType.Handle), LIsDateTime, FixName(ARttiParameters[I].Name, FRelativeUrl), ARttiParameters[I].ParamType.Handle);
         Inc(LParametersCount);
       end;
     end;
@@ -1545,8 +1572,6 @@ begin
     else
       raise EipRestService.CreateFmt('You should declare the attribute [ContentType()] in method "%s"', [FQualifiedName]);
   end
-  else if (LBodyKindDetected = TBodyKindDetected.MultipartFormData) and (FMultipartFormDataParamIndex = -1) then
-    raise EipRestService.CreateFmt('You can''t declare MultipartFormData in BodyKind without have an body argument of TMultipartFormData type in method "%s"', [FQualifiedName])
   else
     FBodyKind := TBodyKind(Ord(LBodyKindDetected) - 1);
 
