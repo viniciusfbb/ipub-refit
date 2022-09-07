@@ -315,6 +315,7 @@ type
     FKind: TMethodKind;
     FHeaderParameters: TArray<TApiParam>;
     FHeaders: TNameValueArray;
+    FMultipartFormDataParamIndex: Integer;
     FParameters: TArray<TApiParam>;
     FQualifiedName: string;
     FRelativeUrl: string;
@@ -777,6 +778,8 @@ begin
   finally
     LJsonSerializer.Free;
   end;
+  if AValue.Kind in [TTypeKind.tkRecord, TTypeKind.tkMRecord, TTypeKind.tkClass, TTypeKind.tkInterface] then
+    Result := Result.DeQuotedString('"');
 end;
 
 procedure TDefaultApiJsonSerializer.SetConverters(const AConverters: TArray<TJsonConverter>);
@@ -1178,9 +1181,17 @@ begin
           end;
         TBodyKind.MultipartFormData:
           begin
-            Assert(Length(FBodyParameters) = 1);
-            Assert(AArgs[FBodyParameters[0].ArgIndex].IsInstanceOf(TMultipartFormData));
-            LMultipartFormData := TMultipartFormData(AArgs[FBodyParameters[0].ArgIndex].AsObject);
+            Assert(FMultipartFormDataParamIndex <> -1);
+            Assert(AArgs[FBodyParameters[FMultipartFormDataParamIndex].ArgIndex].IsInstanceOf(TMultipartFormData));
+            LMultipartFormData := TMultipartFormData(AArgs[FBodyParameters[FMultipartFormDataParamIndex].ArgIndex].AsObject);
+            for I := 0 to Length(FBodyParameters) - 1 do
+            begin
+              if I = FMultipartFormDataParamIndex then
+                Continue;
+              LArgumentAsString := GetStringValue(AArgs[FBodyParameters[I].ArgIndex], FBodyParameters[I].TypeInfo, FBodyParameters[I].IsDateTime);
+              if not LArgumentAsString.IsEmpty then
+                LMultipartFormData.AddField(FBodyParameters[I].Name, LArgumentAsString);
+            end;
             LMultipartFormData.Stream.Position := 0;
             // You can optimize by using the LMultipartFormData.Stream directly but you need to handle the flow of freeing LBodyContent
             LBodyContent.CopyFrom(LMultipartFormData.Stream, LMultipartFormData.Stream.Size);
@@ -1188,10 +1199,7 @@ begin
             if LContentHeaderIndex > -1 then
               LHeaders[LContentHeaderIndex].Value := LMultipartFormData.MimeTypeHeader
             else
-            begin
               LHeaders := LHeaders + [TNameValuePair.Create('Content-Type', LMultipartFormData.MimeTypeHeader)];
-              LContentHeaderIndex := Length(LHeaders) - 1;
-            end;
           end;
       else
         Assert(False);
@@ -1329,24 +1337,22 @@ type
   end;
 
   function IsBodyParam(const ARttiParameter: TRttiParameter;
-     const ACurrentBodyArgsCount: Integer; var AIsBodyOnlyText: Boolean;
-     var ABodyKind: TBodyKindDetected): Boolean;
+     const ACurrentBodyArgsCount: Integer; var AMultipartFormDataParamIndex: Integer;
+     var AIsBodyOnlyText: Boolean; var ABodyKind: TBodyKindDetected): Boolean;
   const
-    CBodyKindsWithOneArgAllowed: set of TBodyKindDetected = [TBodyKindDetected.Json, TBodyKindDetected.Text, TBodyKindDetected.MultipartFormData];
+    CBodyKindsWithOneArgAllowed: set of TBodyKindDetected = [TBodyKindDetected.Json, TBodyKindDetected.Text];
   begin
     Result := IsBodyName(ARttiParameter.Name) or TRttiUtils.HasAttribute<BodyAttribute>(ARttiParameter.GetAttributes);
 
     if (ARttiParameter.ParamType.TypeKind = TTypeKind.tkClass) and
       (ARttiParameter.ParamType.Handle.TypeData.ClassType.InheritsFrom(TMultipartFormData)) then
     begin
-      if ABodyKind = TBodyKindDetected.Undefined then
-        ABodyKind := TBodyKindDetected.MultipartFormData;
-      if ABodyKind <> TBodyKindDetected.MultipartFormData then
-        raise EipRestService.CreateFmt('Wrong body content type. Expected MultipartFormData in method "%s".', [FQualifiedName]);
+      if AMultipartFormDataParamIndex <> -1 then
+        raise EipRestService.CreateFmt('The body in method "%s" requires just one TMultipartFormData.', [FQualifiedName]);
+      AMultipartFormDataParamIndex := ACurrentBodyArgsCount;
+      ABodyKind := TBodyKindDetected.MultipartFormData;
       Result := True;
-    end
-    else if Result and (ABodyKind = TBodyKindDetected.MultipartFormData) then
-      raise EipRestService.CreateFmt('Body content kind set to "TBodyKind.MultipartFormData" but the argument "%s" is not of "TMultipartFormData" in method "%s"', [ARttiParameter.Name, FQualifiedName]);
+    end;
 
     if Result then
     begin
@@ -1403,6 +1409,7 @@ begin
   inherited Create;
   FTryFunction := False;
   FTryFunctionResultParameterIndex := -1;
+  FMultipartFormDataParamIndex := -1;
   FQualifiedName := AQualifiedName;
   if TRttiUtils.HasAttribute<HeaderAttribute>(AAttributes) then
     raise EipRestService.CreateFmt('Cannot possible to use the attribute [Header()] in method "%s", it is reserved just for parameters. For methods, use the attribute [Headers()] in plural', [AQualifiedName]);
@@ -1510,7 +1517,7 @@ begin
     end
     else
     begin
-      if IsBodyParam(ARttiParameters[I], Length(FBodyParameters), LIsBodyOnlyText, LBodyKindDetected) then
+      if IsBodyParam(ARttiParameters[I], Length(FBodyParameters), FMultipartFormDataParamIndex, LIsBodyOnlyText, LBodyKindDetected) then
       begin
         if not (FKind in CMethodsWithBodyContent) then
           raise EipRestService.CreateFmt('The kind of the method %s does not permit a body content', [FQualifiedName]);
@@ -1538,6 +1545,8 @@ begin
     else
       raise EipRestService.CreateFmt('You should declare the attribute [ContentType()] in method "%s"', [FQualifiedName]);
   end
+  else if (LBodyKindDetected = TBodyKindDetected.MultipartFormData) and (FMultipartFormDataParamIndex = -1) then
+    raise EipRestService.CreateFmt('You can''t declare MultipartFormData in BodyKind without have an body argument of TMultipartFormData type in method "%s"', [FQualifiedName])
   else
     FBodyKind := TBodyKind(Ord(LBodyKindDetected) - 1);
 
